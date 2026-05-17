@@ -76,6 +76,34 @@ python tools/query.py --sql "解約率の推移を出して"
 - read-only 接続・`SELECT` 限定・複文/DDL/PRAGMA 禁止・`LIMIT` 強制・`EXPLAIN` 構文検証。
 - 失敗時はエラー文を食わせて **1回だけ自己修復**。それでも駄目ならテンプレート＋全文検索のみで回答。
 
+## 精度評価とゴールデンデータ
+
+SLM 中心ステージ（グラフ抽出・同一判定・query）の精度回帰を数値で測れるように、
+ゴールデンデータと CLI 評価ランナーを `data/eval/` + `tools/eval/` に用意。
+
+```bash
+# Graph 抽出 (entities/relations/facts の P/R/F1)
+python -m tools.eval extract --gold data/eval/gold/extract/acme-overview.yml --runs 3
+
+# Entity Dedup (同一判定の混同行列 + level 一致率)
+python -m tools.eval dedup   --gold data/eval/gold/dedup/pairs.yml            # SLM 込み
+python -m tools.eval dedup   --gold data/eval/gold/dedup/pairs.yml --no-adjudicate  # 規則のみ
+
+# Query (route 一致率・SQL 実行成功率・期待行/出典含有率)
+python -m tools.eval query   --gold data/eval/gold/query/acme-overview.yml --runs 3
+```
+
+レポートは `data/eval/runs/<UTC>__<model>__<tag>__<stage>.{json,md}` に保存。
+
+**安全不変条件**: 評価ランナーは引数や環境に関わらず本番 DB (`data/kg.sqlite`) に
+触れない。CLI エントリで `config.KG_DB` を `data/eval/_runtime/` または
+`data/eval/fixtures/` 配下へ書き換え、`fixtures.assert_not_prod()` ガードを
+すべての DB アクセス手前に通している。`--db` 系のフラグも意図的に存在しない。
+
+ゴールドの編集は `data/eval/gold/` 配下の YAML を直接更新する（spec は
+`docs/future-tasks-design.md` ではなく `tools/eval/__init__.py` の docstring
+を参照）。
+
 ## 既知の論点 / 今後
 
 - 画像はスコープ外（docling がプレースホルダ化）。将来 OCR/画像説明を別パスで。

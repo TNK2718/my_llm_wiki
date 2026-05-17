@@ -210,11 +210,18 @@ __marimo__/
 node_modules/
 
 storage/
-data/
+data/*
 memo/
 *.tsbuildinfo
 
-# eval (LLM-driven; outputs not checked in)
+# eval — gold と runs は git 管理、runtime/fixtures は再生成可能なので無視
+!data/eval/
+data/eval/_runtime/*
+!data/eval/_runtime/.gitkeep
+data/eval/fixtures/*
+!data/eval/fixtures/.gitkeep
+
+# 旧 eval パス（参考）
 eval/storage/*.sqlite*
 eval/results/*.json
 

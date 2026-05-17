@@ -1,0 +1,41 @@
+# Graph 抽出 evaluator のゴールド。
+# raw/extracted/acme-overview.md から人手アノテーション。
+# 振り分けは prompts/extract_graph.txt のルールに準拠:
+#   - スカラ値 (数値・地名等) → facts
+#   - 別実体への参照 (人・組織・製品) → relations
+schema_version: 1
+doc_slug: acme-overview
+source: raw/extracted/acme-overview.md
+
+entities:
+  - name: "アクメ株式会社"
+    type: org
+    aliases: ["Acme Inc.", "アクメ"]   # 別表記が出ても OK
+  - name: "山田 太郎"
+    type: person
+    aliases: ["山田太郎"]
+  - name: "鈴木 花子"
+    type: person
+    aliases: ["鈴木花子"]
+  - name: "SmartScan"
+    type: product
+    aliases: ["Smart Scan"]
+  - name: "グローバルテック社"
+    type: org
+    aliases: ["グローバルテック"]
+  - name: "ベータ製造株式会社"
+    type: org
+    aliases: ["ベータ製造"]
+
+relations:
+  - {subject: "アクメ株式会社", predicate: "CEO",       object: "山田 太郎"}
+  - {subject: "アクメ株式会社", predicate: "CTO",       object: "鈴木 花子"}
+  - {subject: "アクメ株式会社", predicate: "主力製品",  object: "SmartScan"}
+  - {subject: "アクメ株式会社", predicate: "親会社",    object: "グローバルテック社"}
+  - {subject: "アクメ株式会社", predicate: "業務提携",  object: "ベータ製造株式会社"}
+
+facts:
+  - {entity: "アクメ株式会社",     attribute: "設立年",     value: "2015年"}
+  - {entity: "アクメ株式会社",     attribute: "本社所在地", value: "東京都港区"}
+  - {entity: "アクメ株式会社",     attribute: "従業員数",   value: "120名"}
+  - {entity: "グローバルテック社", attribute: "本社所在地", value: "シンガポール"}

@@ -1,0 +1,48 @@
+# Query evaluator のゴールド。fixture (data/eval/fixtures/<fixture>) を前提とする。
+# fixture は同名 extract gold から決定的に build される（fixtures.build_fixture）。
+schema_version: 1
+fixture: acme.sqlite
+extract_gold: data/eval/gold/extract/acme-overview.yml
+
+qa:
+  # === template 経路 ===
+  - q: "アクメ株式会社の CEO は誰？"
+    expected_route: template
+    expected_row_contains:
+      - {column: o, value: "山田 太郎"}
+    expected_doc_slugs: [acme-overview]
+
+  - q: "アクメ株式会社の CTO は誰？"
+    expected_route: template
+    expected_row_contains:
+      - {column: o, value: "鈴木 花子"}
+
+  - q: "アクメ株式会社の親会社は？"
+    expected_route: template
+    expected_row_contains:
+      - {column: o, value: "グローバルテック社"}
+
+  - q: "アクメ株式会社の主力製品は？"
+    expected_route: template
+    expected_row_contains:
+      - {column: o, value: "SmartScan"}
+
+  - q: "アクメ株式会社の設立年は？"
+    expected_route: template
+    expected_row_contains:
+      - {column: v, value: "2015年"}
+
+  - q: "アクメ株式会社の本社所在地は？"
+    expected_route: template
+    expected_row_contains:
+      - {column: v, value: "東京都港区"}
+
+  - q: "グローバルテック社の本社所在地は？"
+    expected_route: template
+    expected_row_contains:
+      - {column: v, value: "シンガポール"}
+
+  # === text2sql 経路（entity 名がそのまま出ない汎用質問）===
+  - q: "従業員数が100名以上の会社はどこ？"
+    expected_route: text2sql
+    expected_row_contains: []   # SQL の正当性のみ評価（行内容は SLM 次第）
