@@ -1,9 +1,9 @@
 """raw/sources/ の原本を markdown 化して raw/extracted/ に保存する。
 
 ルーティング:
-  pdf / docx / pptx  -> docling
-  xlsx               -> pandas で各シートを markdown 表に
-  txt / md           -> そのままコピー
+  pdf / docx / pptx / xlsx  -> docling（方眼紙レイアウトや結合セルにも強い）
+  csv                       -> pandas で markdown 表に
+  txt / md                  -> そのままコピー
 
 原本は読むだけ。書き換えない。
 """
@@ -23,16 +23,15 @@ def extract_docling(path):
     return result.document.export_to_markdown()
 
 
-def extract_xlsx(path):
+def extract_csv(path):
     import pandas as pd
 
-    sheets = pd.read_excel(path, sheet_name=None)
-    out = []
-    for sheet_name, df in sheets.items():
-        out.append(f"## シート: {sheet_name}\n")
-        out.append(df.to_markdown(index=False))
-        out.append("")
-    return "\n".join(out)
+    # 日本語 CSV は cp932 が混じるので utf-8-sig → cp932 の順で試す
+    try:
+        df = pd.read_csv(path, encoding="utf-8-sig")
+    except UnicodeDecodeError:
+        df = pd.read_csv(path, encoding="cp932")
+    return df.to_markdown(index=False)
 
 
 def main():
@@ -51,10 +50,10 @@ def main():
             print(f"skip (既存): {out.name}")
             continue
         try:
-            if ext in ("pdf", "docx", "pptx"):
+            if ext in ("pdf", "docx", "pptx", "xlsx"):
                 text = extract_docling(path)
-            elif ext == "xlsx":
-                text = extract_xlsx(path)
+            elif ext == "csv":
+                text = extract_csv(path)
             elif ext in ("txt", "md"):
                 text = path.read_text(encoding="utf-8", errors="replace")
             else:
