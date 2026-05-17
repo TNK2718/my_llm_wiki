@@ -23,7 +23,7 @@
 ## セットアップ
 
 ```bash
-ollama pull qwen2.5:14b
+ollama pull gemma4:e2b
 uv sync   # pyproject.toml から venv 作成 & 依存インストール
 # 以降の python コマンドは `uv run python ...` で実行（venv を自動有効化）
 # DB はスクリプト初回実行時に schema.sql から自動作成

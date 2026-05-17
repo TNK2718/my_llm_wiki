@@ -218,6 +218,9 @@ memo/
 eval/storage/*.sqlite*
 eval/results/*.json
 
+# Knowledge graph DB (generated from schema.sql on first run)
+tools/kg.sqlite*
+
 # Editor / agent local state
 .claude/
 .vscode/

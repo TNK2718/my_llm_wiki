@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # --- Ollama ---
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:14b"          # 日本語が得意なモデルを推奨。7B でも動く。
+MODEL = "gemma4:e2b"           # エッジ向け 2.3B 実効パラメータ。VRAM 少なめでも動く。
 NUM_CTX = 8192                 # モデルのコンテキスト長に合わせる
 TEMPERATURE = 0.2              # 保守係なので低め
 
