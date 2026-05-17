@@ -9,6 +9,7 @@
   4. 関数的述語・属性の矛盾をルール検出（非破壊で conflict_group 化）
   5. log 追記 → 人間用レビュー要約（矛盾・新規実体を提示）
 """
+import re
 import sys
 import textwrap
 
@@ -16,6 +17,16 @@ import config
 import llm
 import db as kg
 import logadd
+
+
+# 関係 object に紛れ込んだスカラ値（2015年/120名/etc）や長文を弾く safety net。
+# 該当した場合は relation を捨てて fact に振り替える（concept entity 化を防ぐ）。
+_SCALAR_RE = re.compile(r"^(約|およそ)?[\d０-９]")
+
+
+def _looks_scalar_or_long(s: str) -> bool:
+    s = (s or "").strip()
+    return bool(s) and (bool(_SCALAR_RE.match(s)) or len(s) > 30)
 
 
 def load_prompt(name):
@@ -93,8 +104,18 @@ def main():
 
     print("[4] 関係・属性の登録と矛盾検出")
     conflicts = []
+    redirected = 0
     for r in rels:
         if not (r.get("subject") and r.get("object") and r.get("predicate")):
+            continue
+        if _looks_scalar_or_long(r["object"]):
+            # スカラ/長文を object に持つ関係は entity 化せず fact に振り替える
+            _, st = kg.add_fact(
+                db, resolve(r["subject"]), r["predicate"], r["object"], doc_id
+            )
+            redirected += 1
+            if st == "conflict":
+                conflicts.append(f"属性矛盾: {r['subject']}.{r['predicate']} = {r['object']}")
             continue
         _, st = kg.add_relation(
             db, resolve(r["subject"]), r["predicate"], resolve(r["object"]),
@@ -102,6 +123,8 @@ def main():
         )
         if st == "conflict":
             conflicts.append(f"関係矛盾: {r['subject']} -{r['predicate']}-> {r['object']}")
+    if redirected:
+        print(f"  関係 → 属性へ振替: {redirected} 件（数値・日付・長文 object）")
     for f in facts:
         if not (f.get("entity") and f.get("attribute")):
             continue

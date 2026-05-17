@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS documents (
 CREATE TABLE IF NOT EXISTS entities (
   id             INTEGER PRIMARY KEY,
   canonical_name TEXT NOT NULL,
-  type           TEXT NOT NULL,           -- person/org/product/project/concept...
+  type           TEXT NOT NULL,           -- person/org/product/project/concept
   norm_key       TEXT NOT NULL,           -- 正規化キー（ブロッキング・突合用）
   attributes     TEXT,                    -- JSON
   status         TEXT NOT NULL DEFAULT 'active',  -- active/merged/conflicted

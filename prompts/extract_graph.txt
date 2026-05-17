@@ -15,11 +15,53 @@
   ]
 }
 
+type の定義:
+- person  自然人（個人）
+- org     会社・チーム・組織
+- product 商品・サービス
+- project プロジェクト・施策・計画
+- concept 抽象概念・方法論・カテゴリ。**数値・日付・人数・期間・地名・住所・文章はここに入れない**
+
 ルール:
 - 資料に明記された情報のみ。推測・常識補完をしない。
 - subject/object は必ず entities に現れる名前を使う。
 - 関係が無ければ relations は空配列。属性が無ければ facts は空配列。
 - 数値・日付・固有名詞は原文どおり正確に。
+
+**値 (facts) と 関係 (relations) の振り分け（厳守）**:
+- スカラ値（数値・年月日・人数・金額・割合・地名・住所・文章）→ **facts のみ**。relations.object には絶対に入れない。
+- 別の実体への参照（人・組織・製品・プロジェクト・抽象概念）→ **relations のみ**。
+- 同じ事実を facts と relations の両方に書かない。
+
+例 1) 「アクメ株式会社の設立年は 2015 年、本社は東京都港区にあり、CEO は山田太郎である。」
+{
+  "entities": [
+    {"name": "アクメ株式会社", "type": "org"},
+    {"name": "山田太郎", "type": "person"}
+  ],
+  "relations": [
+    {"subject": "アクメ株式会社", "predicate": "CEO", "object": "山田太郎",
+     "evidence": "CEO は山田太郎"}
+  ],
+  "facts": [
+    {"entity": "アクメ株式会社", "attribute": "設立年", "value": "2015年"},
+    {"entity": "アクメ株式会社", "attribute": "本社所在地", "value": "東京都港区"}
+  ]
+}
+※ 「2015年」「120名」のような数値も「東京都港区」のような地名も **facts のみ**。relations の object には実体（人・組織・製品・プロジェクト・概念）しか置かない。
+
+例 2) 「異常検知ソフトウェア SmartScan は工場ライン向けに開発された。」
+{
+  "entities": [
+    {"name": "SmartScan", "type": "product"},
+    {"name": "異常検知", "type": "concept"}
+  ],
+  "relations": [
+    {"subject": "SmartScan", "predicate": "カテゴリ", "object": "異常検知",
+     "evidence": "異常検知ソフトウェア SmartScan"}
+  ],
+  "facts": []
+}
 
 === 資料 ===
 {CONTENT}
