@@ -12,13 +12,12 @@
 | テキスト抽出 (pdf/docx/pptx→docling, xlsx→pandas) | `extract.py` |
 | 取り込み全体制御・分割 | `ingest.py` |
 | 正規化・候補絞り込み・矛盾検出 | `db.py`（決定的ルール） |
-| 索引/射影ページ生成 | `project.py`（DB→markdown, モデル不介入） |
 | 健康診断（矛盾・孤立・統計） | `lint.py` |
 | 検索テンプレート・SQL 検証・自己修復 | `query.py` |
 | ダッシュボード API + 静的配信 | `server.py`（FastAPI, DB は read-only） |
 | 要約・グラフ抽出・同一判定・SQL・回答生成 | SLM（1コール1タスク） |
 
-**正本は `tools/kg.sqlite`。** ダッシュボードはそこを read-only で参照。`/api/ask` のみ Ollama を使用。
+**正本は `data/kg.sqlite`。** ダッシュボードはそこを read-only で参照。`/api/ask` のみ Ollama を使用。
 
 ## セットアップ
 
@@ -39,12 +38,9 @@ cp 提案書.pdf 議事録.docx 実績.xlsx raw/sources/
 python tools/extract.py
 python tools/ingest.py raw/extracted/提案書.md      # → DB へ。矛盾はレビュー要約に出る
 
-# ダッシュボード（推奨）
+# ダッシュボード
 python tools/server.py                              # http://127.0.0.1:8000
 #   Overview / Entities / Graph / Conflicts / Ask を1画面で
-
-# 任意: Obsidian で見たい場合の read-only 射影
-python tools/project.py
 
 # 健康診断（CLI）
 python tools/lint.py

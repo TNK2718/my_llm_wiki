@@ -12,9 +12,9 @@ TEMPERATURE = 0.2              # 保守係なので低め
 # --- パス ---
 RAW_SOURCES = ROOT / "raw" / "sources"
 RAW_EXTRACTED = ROOT / "raw" / "extracted"
-WIKI = ROOT / "wiki"
 PROMPTS = ROOT / "prompts"
 KG_DB = ROOT / "data" / "kg.sqlite"           # ナレッジグラフ（正本）
+LOG_PATH = ROOT / "data" / "log.md"           # 取り込み等の append-only ログ
 SCHEMA_SQL = ROOT / "tools" / "schema.sql"
 
 # --- 分割要約の閾値（おおよその文字数。SLM のコンテキストに合わせて小さめ）---

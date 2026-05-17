@@ -1,5 +1,5 @@
 """log.md に追記する。プレフィックスを固定して grep 可能にする。
-  grep "^## \\[" wiki/log.md | tail -5
+  grep "^## \\[" data/log.md | tail -5
 """
 import sys
 from datetime import date
@@ -7,8 +7,9 @@ import config
 
 
 def add(kind: str, title: str, detail: str = ""):
-    log = config.WIKI / "log.md"
+    log = config.LOG_PATH
     if not log.exists():
+        log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text("# Log\n\n_append-only。手で並べ替えない。_\n\n", encoding="utf-8")
     entry = f"## [{date.today()}] {kind} | {title}\n"
     if detail:

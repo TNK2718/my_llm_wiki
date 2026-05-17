@@ -14,8 +14,7 @@
 ## 1. レイヤー
 
 - `raw/sources/` 原本（不変）。`raw/extracted/` 抽出 markdown（再生成可）。
-- `tools/kg.sqlite` **ナレッジグラフ＝正本**（documents/entities/relations/facts/mentions）。
-- `wiki/` DB から射影した read-only ページ（Obsidian 閲覧用、`project.py` が再生成）。
+- `data/kg.sqlite` **ナレッジグラフ＝正本**（documents/entities/relations/facts/mentions）。
 - `web/` + `server.py` 人間用ダッシュボード（DB を read-only 参照）。あなたは関与しない。
 - `tools/` 決定的スクリプト。突合・矛盾管理・索引・検索制御はここの責務。
 
@@ -38,7 +37,6 @@
 1. テンプレート検索で構造化結果が得られればそれを使う（あなたは SQL を書かない）。
 2. 足りなければ text2sql が呼ばれる。SELECT 1文のみ・スキーマ厳守。
 3. 全文検索の文書抜粋と合わせ、`answer.txt` の規則で出典付き回答。
-4. 価値ある分析は `wiki/syntheses/` への保存を人間に提案。
 
 ## 5. ビジネス/チーム運用
 
