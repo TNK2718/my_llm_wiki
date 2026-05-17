@@ -1,0 +1,19 @@
+[project]
+name = "my-llm-wiki"
+version = "0.1.0"
+description = "ナレッジグラフ版ローカル LLM Wiki"
+requires-python = ">=3.10"
+dependencies = [
+    "docling",
+    "pandas",
+    "openpyxl",
+    "requests",
+    "tabulate",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.uv]
+# 7-day minimum package age policy. Relative duration is evaluated at
+# resolution time, so no manual/CI date bumps are needed.
+exclude-newer = "7 days"
