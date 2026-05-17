@@ -1,0 +1,26 @@
+あなたは知識グラフ抽出器です。次の資料から実体・関係・属性を抽出してください。
+
+出力は **JSON オブジェクトのみ**。前置き・説明・コードフェンス禁止。形式:
+
+{
+  "entities": [
+    {"name": "表記そのまま", "type": "person|org|product|project|concept"}
+  ],
+  "relations": [
+    {"subject": "実体名", "predicate": "関係を表す短い日本語", "object": "実体名",
+     "evidence": "根拠となる原文の短い引用"}
+  ],
+  "facts": [
+    {"entity": "実体名", "attribute": "属性名", "value": "値"}
+  ]
+}
+
+ルール:
+- 資料に明記された情報のみ。推測・常識補完をしない。
+- subject/object は必ず entities に現れる名前を使う。
+- 関係が無ければ relations は空配列。属性が無ければ facts は空配列。
+- 数値・日付・固有名詞は原文どおり正確に。
+
+=== 資料 ===
+{CONTENT}
+=== ここまで ===
