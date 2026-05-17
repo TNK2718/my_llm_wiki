@@ -43,11 +43,10 @@ def similarity(a: str, b: str) -> float:
 
 
 # ---------- 文書 ----------
-def upsert_document(db, slug, title, path, summary, body) -> int:
+def upsert_document(db, slug, title, path, body) -> int:
     db.execute(
-        "INSERT OR REPLACE INTO documents(slug,title,path,summary,ingested_at) "
-        "VALUES(?,?,?,?,?)",
-        (slug, title, path, summary, date.today().isoformat()),
+        "INSERT OR REPLACE INTO documents(slug,title,path,ingested_at) VALUES(?,?,?,?)",
+        (slug, title, path, date.today().isoformat()),
     )
     db.execute("INSERT INTO doc_fts(slug,title,body) VALUES(?,?,?)", (slug, title, body))
     return db.execute("SELECT id FROM documents WHERE slug=?", (slug,)).fetchone()[0]
@@ -166,10 +165,10 @@ def add_fact(db, entity_id, attr, value, doc_id):
     return fid, "ok"
 
 
-def add_mention(db, entity_id, doc_id, surface, context):
+def add_mention(db, entity_id, doc_id, surface):
     db.execute(
-        "INSERT INTO mentions(entity_id,document_id,surface_form,context) VALUES(?,?,?,?)",
-        (entity_id, doc_id, surface, context),
+        "INSERT INTO mentions(entity_id,document_id,surface_form) VALUES(?,?,?)",
+        (entity_id, doc_id, surface),
     )
 
 

@@ -6,7 +6,6 @@ CREATE TABLE IF NOT EXISTS documents (
   slug        TEXT UNIQUE NOT NULL,
   title       TEXT,
   path        TEXT,
-  summary     TEXT,
   ingested_at TEXT NOT NULL
 );
 
@@ -47,8 +46,7 @@ CREATE TABLE IF NOT EXISTS mentions (
   id           INTEGER PRIMARY KEY,
   entity_id    INTEGER NOT NULL REFERENCES entities(id),
   document_id  INTEGER NOT NULL REFERENCES documents(id),
-  surface_form TEXT,
-  context      TEXT
+  surface_form TEXT
 );
 
 CREATE TABLE IF NOT EXISTS facts (

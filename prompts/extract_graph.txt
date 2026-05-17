@@ -63,6 +63,6 @@ type の定義:
   "facts": []
 }
 
-=== 資料 ===
+{KNOWN_ENTITIES}=== 資料 ===
 {CONTENT}
 === ここまで ===

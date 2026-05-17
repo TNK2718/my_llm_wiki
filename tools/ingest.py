@@ -3,8 +3,8 @@
   python tools/ingest.py raw/extracted/議事録.md
 
 手順:
-  1. 分割要約（map-reduce, SLM）
-  2. グラフ抽出: entities/relations/facts を JSON で（SLM）
+  1. semantic chunking（markdown header / 段落境界を尊重）
+  2. グラフ抽出: entities/relations/facts を JSON で（SLM, per-chunk + running entity hint）
   3. 突合: ルール正規化 → 曖昧時のみ SLM 判定 → DB へ（決定的中心）
   4. 関数的述語・属性の矛盾をルール検出（非破壊で conflict_group 化）
   5. log 追記 → 人間用レビュー要約（矛盾・新規実体を提示）
@@ -19,8 +19,6 @@ import db as kg
 import logadd
 
 
-# 関係 object に紛れ込んだスカラ値（2015年/120名/etc）や長文を弾く safety net。
-# 該当した場合は relation を捨てて fact に振り替える（concept entity 化を防ぐ）。
 _SCALAR_RE = re.compile(r"^(約|およそ)?[\d０-９]")
 
 
@@ -33,21 +31,140 @@ def load_prompt(name):
     return (config.PROMPTS / name).read_text(encoding="utf-8")
 
 
-def chunk(text, size):
+def _char_split(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
-def summarize(text):
-    tmpl = load_prompt("summarize.txt")
-    parts = [llm.ask(tmpl.replace("{CONTENT}", c)) for c in chunk(text, config.CHUNK_CHARS)]
-    return parts[0] if len(parts) == 1 else llm.ask(tmpl.replace("{CONTENT}", "\n\n".join(parts)))
+def _split_by_header_level(text: str, level: int) -> list[str]:
+    """Markdown を指定レベル（例 ## なら 2）のヘッダ位置で切る。該当ヘッダが無ければ単一要素を返す。"""
+    pat = re.compile(rf"(?m)^#{{{level}}}\s")
+    starts = [m.start() for m in pat.finditer(text)]
+    if not starts:
+        return [text]
+    sections = []
+    if starts[0] != 0:
+        sections.append(text[: starts[0]])
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(text)
+        sections.append(text[s:e])
+    return [s for s in sections if s.strip()]
 
 
-def extract_graph(summary):
-    g = llm.ask_json(load_prompt("extract_graph.txt").replace("{CONTENT}", summary))
+def _split_recursive(text: str, max_chars: int, levels: list[int]) -> list[str]:
+    """levels の順にヘッダで切り、max_chars 超のセクションだけさらに深いレベルへ再帰。"""
+    if len(text) <= max_chars or not levels:
+        return [text]
+    level = levels[0]
+    parts = _split_by_header_level(text, level)
+    if len(parts) == 1:
+        return _split_recursive(text, max_chars, levels[1:])
+    out = []
+    for p in parts:
+        if len(p) <= max_chars:
+            out.append(p)
+        else:
+            out.extend(_split_recursive(p, max_chars, levels[1:]))
+    return out
+
+
+def _greedy_pack(units: list[str], max_chars: int, sep: str = "\n\n") -> list[str]:
+    """隣接 unit を max_chars を超えない範囲で結合。"""
+    out, cur, cur_len = [], [], 0
+    for u in units:
+        ul = len(u)
+        if not cur:
+            cur, cur_len = [u], ul
+            continue
+        if cur_len + len(sep) + ul > max_chars:
+            out.append(sep.join(cur))
+            cur, cur_len = [u], ul
+        else:
+            cur.append(u)
+            cur_len += len(sep) + ul
+    if cur:
+        out.append(sep.join(cur))
+    return out
+
+
+def semantic_chunk(text: str, max_chars: int) -> list[str]:
+    """markdown header → 段落 → 文字数 の優先順で意味的に分割。"""
+    if not text:
+        return [""]
+    if len(text) <= max_chars:
+        return [text]
+
+    if re.search(r"(?m)^#{1,6}\s", text):
+        units = _split_recursive(text, max_chars, [2, 3, 4, 5, 6])
+    else:
+        units = [u for u in re.split(r"\n\s*\n", text) if u.strip()] or [text]
+
+    expanded = []
+    for u in units:
+        if len(u) <= max_chars:
+            expanded.append(u)
+            continue
+        paras = [p for p in re.split(r"\n\s*\n", u) if p.strip()]
+        for p in paras:
+            if len(p) <= max_chars:
+                expanded.append(p)
+            else:
+                expanded.extend(_char_split(p, max_chars))
+
+    return _greedy_pack(expanded, max_chars)
+
+
+def _format_known_entities(known: list[dict]) -> str:
+    if not known:
+        return ""
+    block = "\n".join(f"- {e['name']} ({e.get('type', 'concept')})" for e in known)
+    return (
+        "このドキュメント内で既に登場したエンティティ"
+        "（同一対象を指す新しい言及があれば、これらの表記を再利用してください）:\n"
+        f"{block}\n\n"
+    )
+
+
+def extract_graph(text: str, known_entities: list[dict] | None = None):
+    tmpl = load_prompt("extract_graph.txt")
+    prompt = tmpl.replace("{KNOWN_ENTITIES}", _format_known_entities(known_entities or [])).replace(
+        "{CONTENT}", text
+    )
+    g = llm.ask_json(prompt)
     if isinstance(g, list):  # 弱いモデルが配列を返す保険
         g = {"entities": g, "relations": [], "facts": []}
     return (g.get("entities") or [], g.get("relations") or [], g.get("facts") or [])
+
+
+def _dedup_entities_by_name(ents: list[dict]) -> list[dict]:
+    """同一 name は最初に出たものを採用（type も最初のものを保持）。"""
+    seen, out = set(), []
+    for e in ents:
+        nm = e.get("name")
+        if not nm or nm in seen:
+            continue
+        seen.add(nm)
+        out.append(e)
+    return out
+
+
+def extract_graph_from_chunks(chunks: list[str]):
+    """単一 chunk なら full-text 1パス、複数なら per-chunk + running entity hint。"""
+    if len(chunks) == 1:
+        return extract_graph(chunks[0])
+
+    ents, rels, facts = [], [], []
+    seen, seen_names = [], set()
+    for c in chunks:
+        e, r, f = extract_graph(c, known_entities=seen)
+        for ent in e:
+            nm = ent.get("name")
+            if nm and nm not in seen_names:
+                seen.append(ent)
+                seen_names.add(nm)
+        ents.extend(e)
+        rels.extend(r)
+        facts.extend(f)
+    return _dedup_entities_by_name(ents), rels, facts
 
 
 def make_adjudicator():
@@ -73,15 +190,15 @@ def main():
     slug = src.stem
     title = slug.replace("-", " ")
 
-    print(f"[1] 要約: {src.name}")
-    summary = summarize(body)
+    chunks = semantic_chunk(body, config.CHUNK_CHARS)
+    print(f"[1] semantic chunking: {src.name} → {len(chunks)} chunk(s)")
 
-    print("[2] グラフ抽出")
-    ents, rels, facts = extract_graph(summary)
+    print("[2] グラフ抽出（per-chunk + running entity hint）" if len(chunks) > 1 else "[2] グラフ抽出（full-text 1パス）")
+    ents, rels, facts = extract_graph_from_chunks(chunks)
     print(f"  entities={len(ents)} relations={len(rels)} facts={len(facts)}")
 
     db = kg.connect()
-    doc_id = kg.upsert_document(db, slug, title, str(src), summary, body)
+    doc_id = kg.upsert_document(db, slug, title, str(src), body)
     adjud = make_adjudicator()
 
     print("[3] 突合（ルール → 曖昧時のみ SLM）")
@@ -93,7 +210,7 @@ def main():
             db, e["name"], e.get("type", "concept"), adjudicate=adjud
         )
         name_to_id[e["name"]] = eid
-        kg.add_mention(db, eid, doc_id, e["name"], summary[:200])
+        kg.add_mention(db, eid, doc_id, e["name"])
         how_count[how] = how_count.get(how, 0) + 1
 
     def resolve(nm):
@@ -109,7 +226,6 @@ def main():
         if not (r.get("subject") and r.get("object") and r.get("predicate")):
             continue
         if _looks_scalar_or_long(r["object"]):
-            # スカラ/長文を object に持つ関係は entity 化せず fact に振り替える
             _, st = kg.add_fact(
                 db, resolve(r["subject"]), r["predicate"], r["object"], doc_id
             )
@@ -147,7 +263,7 @@ def main():
             print("  -", c)
     else:
         print("矛盾なし")
-    print("要約冒頭:\n" + textwrap.indent(summary[:600], "  "))
+    print("本文冒頭:\n" + textwrap.indent(body[:600], "  "))
     print("==================================================")
 
 
