@@ -22,7 +22,7 @@ jobs:
           enable-cache: true
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --frozen
 
       - name: pip-audit
         run: uv run --with pip-audit pip-audit
