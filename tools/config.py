@@ -14,7 +14,7 @@ RAW_SOURCES = ROOT / "raw" / "sources"
 RAW_EXTRACTED = ROOT / "raw" / "extracted"
 WIKI = ROOT / "wiki"
 PROMPTS = ROOT / "prompts"
-KG_DB = ROOT / "tools" / "kg.sqlite"          # ナレッジグラフ（正本）
+KG_DB = ROOT / "data" / "kg.sqlite"           # ナレッジグラフ（正本）
 SCHEMA_SQL = ROOT / "tools" / "schema.sql"
 
 # --- 分割要約の閾値（おおよその文字数。SLM のコンテキストに合わせて小さめ）---

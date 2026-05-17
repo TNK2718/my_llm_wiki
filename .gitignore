@@ -218,8 +218,11 @@ memo/
 eval/storage/*.sqlite*
 eval/results/*.json
 
-# Knowledge graph DB (generated from schema.sql on first run)
-tools/kg.sqlite*
+# Ingest inputs / intermediate extractions (may contain confidential docs)
+raw/sources/*
+!raw/sources/.gitkeep
+raw/extracted/*
+!raw/extracted/.gitkeep
 
 # Editor / agent local state
 .claude/

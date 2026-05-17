@@ -13,6 +13,7 @@ def connect(readonly: bool = False) -> sqlite3.Connection:
     if readonly:
         db = sqlite3.connect(f"file:{config.KG_DB}?mode=ro", uri=True)
     else:
+        config.KG_DB.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(config.KG_DB)
         db.executescript(config.SCHEMA_SQL.read_text(encoding="utf-8"))
     db.row_factory = sqlite3.Row
