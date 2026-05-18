@@ -46,3 +46,11 @@ qa:
   - q: "従業員数が100名以上の会社はどこ？"
     expected_route: text2sql
     expected_row_contains: []   # SQL の正当性のみ評価（行内容は SLM 次第）
+
+  # 日常語 "社名" / "代表" が canonical_name / 'CEO' にマップされるべきケース。
+  # template ルートは "アクメ株式会社" の連続部分一致が無いため不発で、
+  # text2sql の修復ループで column_hints が効くことを期待する。
+  - q: "社名がアクメで始まる会社の代表は誰？"
+    expected_route: text2sql
+    expected_row_contains:
+      - {column: o, value: "山田 太郎"}

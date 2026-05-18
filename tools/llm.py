@@ -21,6 +21,23 @@ def ask(prompt: str, system: str = "", temperature: float | None = None) -> str:
     return r.json().get("response", "").strip()
 
 
+def embed(text: str) -> list[float] | None:
+    """Ollama /api/embeddings を 1 回叩く。失敗時は None で呼び出し側に縮退を委ねる。"""
+    if not text:
+        return None
+    try:
+        r = requests.post(
+            config.EMBED_URL,
+            json={"model": config.EMBED_MODEL, "prompt": text},
+            timeout=60,
+        )
+        r.raise_for_status()
+        v = r.json().get("embedding")
+        return v if isinstance(v, list) and v else None
+    except requests.RequestException:
+        return None
+
+
 def ask_json(prompt: str, system: str = ""):
     """JSON のみを返させたい時用。失敗したら空 list を返す（弱いモデルの保険）。"""
     raw = ask(prompt, system=system)

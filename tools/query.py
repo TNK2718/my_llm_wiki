@@ -6,8 +6,10 @@ CLI:
 
 サーバからは answer_question() を呼ぶ。
 """
+import hashlib
 import re
 import sqlite3
+import struct
 import sys
 
 import config
@@ -52,6 +54,120 @@ def run_ro(sql: str):
     return [dict(r) for r in db.execute(sql).fetchall()]
 
 
+def _embed_cache_conn() -> sqlite3.Connection:
+    config.EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(config.EMBED_CACHE_DB)
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS embed_cache("
+        " key TEXT PRIMARY KEY, vec BLOB NOT NULL)"
+    )
+    return c
+
+
+def _embed_cached(text: str) -> list[float] | None:
+    if not text:
+        return None
+    key = hashlib.sha1(f"{config.EMBED_MODEL}|{text}".encode("utf-8")).hexdigest()
+    c = _embed_cache_conn()
+    row = c.execute("SELECT vec FROM embed_cache WHERE key=?", (key,)).fetchone()
+    if row:
+        blob = row[0]
+        n = len(blob) // 4
+        return list(struct.unpack(f"{n}f", blob))
+    v = llm.embed(text)
+    if v is None:
+        return None
+    blob = struct.pack(f"{len(v)}f", *v)
+    c.execute("INSERT OR REPLACE INTO embed_cache(key,vec) VALUES(?,?)", (key, blob))
+    c.commit()
+    return v
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    s = sa = sb = 0.0
+    for x, y in zip(a, b):
+        s += x * y
+        sa += x * x
+        sb += y * y
+    if sa == 0 or sb == 0:
+        return 0.0
+    return s / ((sa ** 0.5) * (sb ** 0.5))
+
+
+def column_hints(question: str) -> str:
+    """text2sql 修復用のヒント文字列。失敗時のみ呼ぶ前提（DB 全値 scan を含むため）。
+
+    - 自由値列（canonical_name, alias, facts.value）は Trigram と埋め込みの和集合で top-K。
+    - 小規模カテゴリ列（type/predicate/attribute）は distinct 値の語彙を列挙。
+    - Ollama embed が落ちていれば埋め込み信号は無効化し、Trigram のみで縮退する。
+    """
+    qn = kg.normalize(question)
+    if not qn:
+        return ""
+    q_vec = _embed_cached(question)
+
+    db = kg.connect(readonly=True)
+    lines: list[str] = []
+
+    free_cols = [
+        ("entities.canonical_name",
+         "SELECT DISTINCT canonical_name AS v, norm_key AS nk "
+         "FROM entities WHERE status!='merged'"),
+        ("entity_aliases.alias",
+         "SELECT DISTINCT alias AS v, norm_key AS nk FROM entity_aliases"),
+        ("facts.value",
+         "SELECT DISTINCT value AS v FROM facts "
+         "WHERE status='active' AND value IS NOT NULL"),
+    ]
+    for col, sql in free_cols:
+        scored = []
+        for r in db.execute(sql):
+            v = r["v"]
+            if not v:
+                continue
+            keys = r.keys()
+            nk = r["nk"] if "nk" in keys and r["nk"] else kg.normalize(v)
+            sim_tri = kg.similarity(qn, nk)
+            contained = 1.0 if (nk and nk in qn) else 0.0
+            sim_emb = 0.0
+            if q_vec is not None:
+                v_vec = _embed_cached(v)
+                if v_vec is not None and len(v_vec) == len(q_vec):
+                    sim_emb = _cosine(q_vec, v_vec)
+            score = max(contained, sim_tri, sim_emb)
+            keep = (
+                contained == 1.0
+                or sim_tri >= config.HINT_TRIGRAM_THRESHOLD
+                or sim_emb >= config.HINT_EMBED_THRESHOLD
+            )
+            if keep:
+                scored.append((score, v))
+        scored.sort(key=lambda t: -t[0])
+        if scored:
+            picks = [f"'{v}'" for _, v in scored[: config.HINT_TOPK_PER_COLUMN]]
+            lines.append(f"- {col} に近い候補: " + ", ".join(picks))
+
+    vocab_cols = [
+        ("entities.type",
+         "SELECT DISTINCT type AS v FROM entities WHERE status!='merged'"),
+        ("relations.predicate",
+         "SELECT DISTINCT predicate AS v FROM relations WHERE status='active'"),
+        ("facts.attribute",
+         "SELECT DISTINCT attribute AS v FROM facts WHERE status='active'"),
+    ]
+    for col, sql in vocab_cols:
+        vals = [r["v"] for r in db.execute(sql) if r["v"]]
+        if vals:
+            shown = vals[: config.HINT_VOCAB_CAP]
+            tail = ", ..." if len(vals) > config.HINT_VOCAB_CAP else ""
+            lines.append(f"- {col} の語彙: " + ", ".join(shown) + tail)
+
+    if not lines:
+        return ""
+    block = "ヒント（DB 内の近い値 / 列の語彙）:\n" + "\n".join(lines)
+    return block[: config.HINT_MAX_CHARS]
+
+
 def text2sql(question: str):
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
     sql = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
@@ -59,8 +175,13 @@ def text2sql(question: str):
         sql = validate_sql(sql)
         return sql, run_ro(sql)
     except (ValueError, sqlite3.Error) as e1:
+        hints = column_hints(question)
+        hint_block = f"\n\n{hints}" if hints else ""
         fix = llm.ask(
-            tmpl.replace("{QUESTION}", question) + f"\n\n直前の SQL はエラー: {e1}\n修正後の SQL のみ:"
+            tmpl.replace("{QUESTION}", question)
+            + f"\n\n直前の SQL はエラー: {e1}"
+            + hint_block
+            + "\n修正後の SQL のみ:"
         )
         sql = validate_sql(re.sub(r"```sql|```", "", fix).strip())
         return sql, run_ro(sql)
