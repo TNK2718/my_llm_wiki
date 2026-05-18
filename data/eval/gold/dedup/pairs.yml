@@ -21,6 +21,7 @@ pairs:
 
   # === same / alias-or-llm (SLM 判定が必要) ===
   - {a: "グローバルテック社",   b: "Global Tech",       type: org,     expected: same, level: alias-or-llm}
+  - {a: "IBM Bob Enterprise",   b: "Bob Enterprise",    type: product, expected: same, level: alias-or-llm}
 
   # === different ===
   - {a: "山田 太郎",            b: "山田 花子",         type: person,  expected: different}
@@ -28,3 +29,5 @@ pairs:
   - {a: "グローバルテック社",   b: "ベータ製造株式会社", type: org,     expected: different}
   - {a: "IBM Bob Pro",          b: "IBM Bob Pro Plus",  type: product, expected: different}
   - {a: "SmartScan",            b: "SmartView",         type: product, expected: different}
+  - {a: "IBM Bob Enterprise",   b: "IBM",               type: org,     expected: different}
+  - {a: "IBM",                  b: "Bob Enterprise",    type: org,     expected: different}
