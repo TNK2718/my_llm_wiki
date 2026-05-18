@@ -214,12 +214,14 @@ data/*
 memo/
 *.tsbuildinfo
 
-# eval — gold と runs は git 管理、runtime/fixtures は再生成可能なので無視
+# eval — gold だけ git 管理。runs/runtime/fixtures は再生成可能なので無視
 !data/eval/
 data/eval/_runtime/*
 !data/eval/_runtime/.gitkeep
 data/eval/fixtures/*
 !data/eval/fixtures/.gitkeep
+data/eval/runs/*
+!data/eval/runs/.gitkeep
 
 # 旧 eval パス（参考）
 eval/storage/*.sqlite*
