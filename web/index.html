@@ -200,8 +200,7 @@
         <textarea id="q" rows="3" placeholder="例) Acme の CEO は誰？ / 解約率の推移を出して"></textarea>
         <div class="ask-row">
           <button id="run">Run</button>
-          <button id="fsql" class="ghost">force text2sql</button>
-          <span class="tag" id="askhint">テンプレート優先 → 必要時のみ SQL 生成</span>
+          <span class="tag" id="askhint">text2sql 生成 → 失敗時は FTS のみで回答</span>
         </div>
       </div>
       <div id="askout"></div>
@@ -210,7 +209,7 @@
 </div>
 <script>
 const $=s=>document.querySelector(s), api=p=>fetch(p).then(r=>r.json());
-let curType="", forceSql=false;
+let curType="";
 
 document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>{
   document.querySelectorAll('nav a').forEach(x=>x.classList.remove('on'));
@@ -310,13 +309,12 @@ async function loadConflicts(){
   $('#cflist').innerHTML=h||'<div class="empty">矛盾は検出されていません</div>';
 }
 
-$('#fsql').onclick=()=>{forceSql=!forceSql;$('#fsql').classList.toggle('on',forceSql);};
 $('#run').onclick=async()=>{
   const q=$('#q').value.trim(); if(!q)return;
   $('#askout').innerHTML='<div class="empty">問い合わせ中…（要約/抽出/回答に時間がかかる場合があります）</div>';
   let r;
   try{ r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({question:q,force_sql:forceSql})}).then(x=>x.json()); }
+        body:JSON.stringify({question:q})}).then(x=>x.json()); }
   catch(e){ $('#askout').innerHTML='<div class="err">サーバ通信失敗</div>'; return; }
   let h='';
   if(r.error) h+=`<div class="err">⚠ ${r.error}</div>`;

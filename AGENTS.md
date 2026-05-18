@@ -23,7 +23,7 @@
 - **要約**（`prompts/summarize.txt`）: 抽出テキスト断片を事実のみ簡潔に。
 - **グラフ抽出**（`prompts/extract_graph.txt`）: entities/relations/facts を厳密 JSON で。
 - **同一判定**（`prompts/dedup_adjudicate.txt`）: 2名称が同一対象か `same/different/unsure` の1語のみ。ルールで絞った曖昧ペアのみ呼ばれる。
-- **text2sql**（`prompts/text2sql.txt`）: 固定スキーマに対する SELECT 1文のみ。書き込み・複文・DDL 禁止。テンプレートで足りる質問では呼ばれない。
+- **text2sql**（`prompts/text2sql.txt`）: 固定スキーマに対する SELECT 1文のみ。書き込み・複文・DDL 禁止。全質問でこの経路を通る。
 - **回答生成**（`prompts/answer.txt`）: 与えられた構造化結果＋文書抜粋のみを根拠に、出典付きで簡潔に。
 
 ## 3. 突合・矛盾の扱い（心構え）
@@ -34,8 +34,8 @@
 
 ## 4. 質問対応の流れ
 
-1. テンプレート検索で構造化結果が得られればそれを使う（あなたは SQL を書かない）。
-2. 足りなければ text2sql が呼ばれる。SELECT 1文のみ・スキーマ厳守。
+1. text2sql で SELECT 1 文を生成し、構造化結果を取得する。スキーマ厳守。
+2. SQL が壊れたら 1 回だけ自己修復、それでも駄目なら fallback で全文検索のみに。
 3. 全文検索の文書抜粋と合わせ、`answer.txt` の規則で出典付き回答。
 
 ## 5. ビジネス/チーム運用
