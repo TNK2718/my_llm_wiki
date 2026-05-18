@@ -1,11 +1,11 @@
 # Graph 抽出 evaluator のゴールド。
-# raw/extracted/acme-overview.md から人手アノテーション。
+# data/eval/sources/acme-overview.md から人手アノテーション。
 # 振り分けは prompts/extract_graph.txt のルールに準拠:
 #   - スカラ値 (数値・地名等) → facts
 #   - 別実体への参照 (人・組織・製品) → relations
 schema_version: 1
 doc_slug: acme-overview
-source: raw/extracted/acme-overview.md
+source: data/eval/sources/acme-overview.md
 
 entities:
   - name: "アクメ株式会社"

@@ -1,5 +1,5 @@
 # Graph 抽出 evaluator のゴールド。
-# raw/extracted/i127-9285-06-05-2026-zz-ja..md (IBM Bob サービス記述書) から人手アノテーション。
+# data/eval/sources/i127-9285.md (IBM Bob サービス記述書) から人手アノテーション。
 #
 # このドキュメントは CHUNK_CHARS=6000 を超えるので semantic_chunk で複数 chunk に分割される。
 # extract_graph_from_chunks が per-chunk + running entity hint 経路を通る初の評価対象。
@@ -9,7 +9,7 @@
 #   - 別実体への参照 (人・組織・製品・概念) → relations
 schema_version: 1
 doc_slug: i127-9285
-source: raw/extracted/i127-9285-06-05-2026-zz-ja..md
+source: data/eval/sources/i127-9285.md
 
 entities:
   # 提供元
