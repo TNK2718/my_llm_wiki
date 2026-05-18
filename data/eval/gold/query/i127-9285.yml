@@ -1,0 +1,38 @@
+# Query evaluator のゴールド (IBM Bob サービス記述書 / i127-9285 fixture)。
+#
+# 目的: text2sql の column_hints が「日常語 ↔ canonical/属性語彙」のギャップを
+# 橋渡しできているかを測る。質問は意図的に gold の語彙とずらしてある:
+#   - "無料トライアル版" は canonical "IBM Bob 無料評価版" / alias "Bob 無料評価版" を指す
+#   - "クレジット" は属性名 "SLA 99.5%未満クレジット" 等を指す
+#   - "コイン" は属性名 "月間Bobcoin" の一部
+#
+# 期待値の検証は row_contains_rate (column: "*") で「rows のどこかに正解値が現れたか」を見る。
+# SLM 生成 SQL の列名は予測困難なので、列指定無し(* = ワイルドカード) を許可する。
+schema_version: 1
+fixture: i127-9285.sqlite
+extract_gold: data/eval/gold/extract/i127-9285.yml
+
+qa:
+  # === 同義語橋渡し: トライアル → 評価版 ===
+  - q: "Bobの無料トライアル版って？"
+    expected_route: text2sql
+    expected_row_contains:
+      - { column: "*", value: "無料評価版" }
+
+  # === 同義語橋渡し: 試用期間 → 評価期間 ===
+  - q: "Bob 無料評価版の試用期間は？"
+    expected_route: text2sql
+    expected_row_contains:
+      - { column: "*", value: "30 日間" }
+
+  # === 別名解決: "IBM Bob" は canonical だが質問は単に "Bob" ===
+  - q: "Bob の SLA 違反時のクレジットは何パーセント？"
+    expected_route: text2sql
+    expected_row_contains:
+      - { column: "*", value: "2%" }
+
+  # === 値域語彙: enterprise の課金粒度 ===
+  - q: "Bob Enterprise の超過課金の単位は？"
+    expected_route: text2sql
+    expected_row_contains:
+      - { column: "*", value: "1000 リソース単位パック" }

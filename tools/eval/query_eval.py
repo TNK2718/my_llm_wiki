@@ -20,18 +20,26 @@ def _norm(s) -> str:
 
 
 def _row_contains_match(rows: list[dict], spec: dict) -> bool:
-    """expected_row_contains の 1 エントリが rows の任意の行に出現するか。"""
+    """expected_row_contains の 1 エントリが rows の任意の行に出現するか。
+
+    column を省略するか "*" にすると全列スキャン (SLM 生成 SQL の列名は
+    予測困難なため、値だけで判定したい場合に使う)。
+    """
     col = spec.get("column")
     expected_value = spec.get("value")
-    if expected_value is None or col is None:
+    if expected_value is None:
         return False
     target = _norm(expected_value)
+    if not target:
+        return False
+    wildcard = (col is None) or (col == "*")
     for r in rows or []:
-        cell = r.get(col)
-        if cell is None:
-            continue
-        if target and target in _norm(cell):
-            return True
+        cells = r.values() if wildcard else [r.get(col)]
+        for cell in cells:
+            if cell is None:
+                continue
+            if target in _norm(cell):
+                return True
     return False
 
 

@@ -141,10 +141,28 @@ def column_hints(question: str) -> str:
     ]
     for col, sql in vocab_cols:
         vals = [r["v"] for r in db.execute(sql) if r["v"]]
-        if vals:
-            shown = vals[: config.HINT_VOCAB_CAP]
-            tail = ", ..." if len(vals) > config.HINT_VOCAB_CAP else ""
-            lines.append(f"- {col} の語彙: " + ", ".join(shown) + tail)
+        if not vals:
+            continue
+        if len(vals) <= config.HINT_VOCAB_CAP:
+            shown = vals
+            tail = ""
+        else:
+            # 語彙が多い列は質問との類似で top-K を選ぶ（insertion order だと
+            # 質問に効く語が末尾に埋もれて切られる失敗が出る）。
+            scored = []
+            for v in vals:
+                nk = kg.normalize(v)
+                sim_tri = kg.similarity(qn, nk)
+                sim_emb = 0.0
+                if q_vec is not None:
+                    vv = _embed_cached(v)
+                    if vv is not None and len(vv) == len(q_vec):
+                        sim_emb = _cosine(q_vec, vv)
+                scored.append((max(sim_tri, sim_emb), v))
+            scored.sort(key=lambda t: -t[0])
+            shown = [v for _, v in scored[: config.HINT_VOCAB_CAP]]
+            tail = ", ..."
+        lines.append(f"- {col} の語彙: " + ", ".join(shown) + tail)
 
     if not lines:
         return ""
@@ -153,22 +171,55 @@ def column_hints(question: str) -> str:
 
 
 def text2sql(question: str):
+    """text2sql 本体。
+
+    1. 素のプロンプトで SQL を生成し実行する。
+    2. 構文・実行エラー、または rows==[] のいずれも修復対象とする。修復は
+       column_hints を注入して 1 回だけ。「0行=正解」と「0行=外し」は区別
+       できないので、ヒントを与えても 0 行ならそのまま返す。
+    """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
-    sql = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+    sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+
+    sql, rows, err = None, None, None
     try:
-        sql = validate_sql(sql)
-        return sql, run_ro(sql)
-    except (ValueError, sqlite3.Error) as e1:
-        hints = column_hints(question)
-        hint_block = f"\n\n{hints}" if hints else ""
-        fix = llm.ask(
-            tmpl.replace("{QUESTION}", question)
-            + f"\n\n直前の SQL はエラー: {e1}"
-            + hint_block
-            + "\n修正後の SQL のみ:"
-        )
-        sql = validate_sql(re.sub(r"```sql|```", "", fix).strip())
-        return sql, run_ro(sql)
+        sql = validate_sql(sql_raw)
+        rows = run_ro(sql)
+        if rows:
+            return sql, rows
+    except (ValueError, sqlite3.Error) as e:
+        err = e
+
+    hints = column_hints(question)
+    if not hints:
+        if err is not None:
+            raise err
+        return sql, rows  # rows == [] 確定
+
+    err_block = f"\n\n直前の SQL はエラー: {err}" if err is not None else (
+        f"\n\n直前の SQL は構文OKだが 0 行だった:\n{sql}\n"
+        "失敗原因は LIKE のパターンが質問語の英訳/言い換えで、DB の実値と一致して"
+        "いない可能性が高い。下記の候補語をそのまま LIKE のパターンに採用すること。"
+    )
+    fix = llm.ask(
+        tmpl.replace("{QUESTION}", question)
+        + err_block
+        + f"\n\n{hints}"
+        + "\n修正後の SQL のみ:"
+    )
+    try:
+        sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())
+        rows2 = run_ro(sql2)
+    except (ValueError, sqlite3.Error) as e2:
+        # 修復 SQL が壊れた: 初回 SQL が有効なら(空でも)それを返す。
+        # 初回も無効なら最初の error を上げる（より原因が近い）。
+        if err is None:
+            return sql, rows
+        raise err
+    if rows2 or err is not None:
+        return sql2, rows2
+    # 修復後も 0 行: 初回の SQL のほうがヒント無しでも素直なので残す
+    return sql, rows
 
 
 def fts_docs(question: str, k: int = 4):
