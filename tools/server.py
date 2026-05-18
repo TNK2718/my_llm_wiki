@@ -178,7 +178,7 @@ def ask(payload: dict = Body(...)):
     question = (payload or {}).get("question", "").strip()
     if not question:
         return JSONResponse({"error": "question is empty"}, status_code=400)
-    return q.answer_question(question, force_sql=bool(payload.get("force_sql")))
+    return q.answer_question(question)
 
 
 @app.get("/")

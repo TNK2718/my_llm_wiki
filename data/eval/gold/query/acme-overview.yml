@@ -1,15 +1,10 @@
 # Query evaluator のゴールド。fixture (data/eval/fixtures/<fixture>) を前提とする。
 # fixture は同名 extract gold から決定的に build される（fixtures.build_fixture）。
 #
-# 設計方針: text2sql route を主に評価する。
-# - query.py:find_entity_term は entities.canonical_name の "in question" 部分一致で
-#   テンプレ経路を発火させる。したがって全 QA は canonical_name
-#   (アクメ株式会社 / 山田 太郎 / 鈴木 花子 / SmartScan / グローバルテック社 /
-#   ベータ製造株式会社) を含まないよう設計し、必ず text2sql に落とす。
-# - alias (アクメ / Smart Scan / 山田太郎 等) は find_entity_term に走査されないため、
-#   "アクメの…" のような短縮表記は安全に使える。
-# - SLM 生成 SQL の列名は予測困難なので expected_row_contains は空に固定し、
-#   主シグナルは route_accuracy と sql_success_rate にする。
+# 設計方針:
+# - 質問は全て text2sql 経路を通る (template route は廃止済み)。
+#   route 検証は撤去ガードとしてのみ残し、主シグナルは sql_success_rate にする。
+# - SLM 生成 SQL の列名は予測困難なので expected_row_contains は空に固定する。
 # - expected_doc_slugs は FTS5 の日本語トークナイズ依存で不安定なため指定しない。
 schema_version: 1
 fixture: acme.sqlite
@@ -46,9 +41,8 @@ qa:
     expected_route: text2sql
     expected_row_contains: []
 
-  # === alias 解決: entity は alias 表記 (アクメ) のみで言及。
-  #     find_entity_term は alias を走査しないのでテンプレに落ちず、
-  #     text2sql 側で entity_aliases LIKE か canonical_name LIKE が必要。
+  # === alias 解決: entity を短縮表記で言及。text2sql 側で
+  #     entity_aliases LIKE か canonical_name LIKE が必要。
   - q: "アクメの主力製品は？"
     expected_route: text2sql
     expected_row_contains: []
