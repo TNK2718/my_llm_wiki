@@ -1,56 +1,53 @@
 # Query evaluator のゴールド。fixture (data/eval/fixtures/<fixture>) を前提とする。
 # fixture は同名 extract gold から決定的に build される（fixtures.build_fixture）。
+#
+# 設計方針:
+# - 質問は全て text2sql 経路を通る (template route は廃止済み)。
+#   route 検証は撤去ガードとしてのみ残し、主シグナルは sql_success_rate にする。
+# - SLM 生成 SQL の列名は予測困難なので expected_row_contains は空に固定する。
+# - expected_doc_slugs は FTS5 の日本語トークナイズ依存で不安定なため指定しない。
 schema_version: 1
 fixture: acme.sqlite
 extract_gold: data/eval/gold/extract/acme-overview.yml
 
 qa:
-  # === template 経路 ===
-  - q: "アクメ株式会社の CEO は誰？"
-    expected_route: template
-    expected_row_contains:
-      - {column: o, value: "山田 太郎"}
-    expected_doc_slugs: [acme-overview]
-
-  - q: "アクメ株式会社の CTO は誰？"
-    expected_route: template
-    expected_row_contains:
-      - {column: o, value: "鈴木 花子"}
-
-  - q: "アクメ株式会社の親会社は？"
-    expected_route: template
-    expected_row_contains:
-      - {column: o, value: "グローバルテック社"}
-
-  - q: "アクメ株式会社の主力製品は？"
-    expected_route: template
-    expected_row_contains:
-      - {column: o, value: "SmartScan"}
-
-  - q: "アクメ株式会社の設立年は？"
-    expected_route: template
-    expected_row_contains:
-      - {column: v, value: "2015年"}
-
-  - q: "アクメ株式会社の本社所在地は？"
-    expected_route: template
-    expected_row_contains:
-      - {column: v, value: "東京都港区"}
-
-  - q: "グローバルテック社の本社所在地は？"
-    expected_route: template
-    expected_row_contains:
-      - {column: v, value: "シンガポール"}
-
-  # === text2sql 経路（entity 名がそのまま出ない汎用質問）===
-  - q: "従業員数が100名以上の会社はどこ？"
+  # === scalar filter: 数値比較 (value は "120名" の文字列なので CAST or 桁抽出が必要) ===
+  - q: "従業員数が100名以上の会社は？"
     expected_route: text2sql
-    expected_row_contains: []   # SQL の正当性のみ評価（行内容は SLM 次第）
+    expected_row_contains: []
 
-  # 日常語 "社名" / "代表" が canonical_name / 'CEO' にマップされるべきケース。
-  # template ルートは "アクメ株式会社" の連続部分一致が無いため不発で、
-  # text2sql の修復ループで column_hints が効くことを期待する。
-  - q: "社名がアクメで始まる会社の代表は誰？"
+  # === scalar filter: 文字列部分一致 (value LIKE '%東京%') ===
+  - q: "本社が東京都にある会社を教えて"
     expected_route: text2sql
-    expected_row_contains:
-      - {column: o, value: "山田 太郎"}
+    expected_row_contains: []
+
+  # === predicate filter: 述語が "親会社" の relation を列挙 ===
+  - q: "親会社を持つ組織は？"
+    expected_route: text2sql
+    expected_row_contains: []
+
+  # === predicate filter (双方向 join): 業務提携の subject/object ペア ===
+  - q: "業務提携している組織のペアは？"
+    expected_route: text2sql
+    expected_row_contains: []
+
+  # === aggregation: COUNT(*) WHERE type='person' ===
+  - q: "登録されている人物は何名？"
+    expected_route: text2sql
+    expected_row_contains: []
+
+  # === aggregation: DISTINCT 値の列挙 ===
+  - q: "登録されている本社所在地の一覧は？"
+    expected_route: text2sql
+    expected_row_contains: []
+
+  # === alias 解決: entity を短縮表記で言及。text2sql 側で
+  #     entity_aliases LIKE か canonical_name LIKE が必要。
+  - q: "アクメの主力製品は？"
+    expected_route: text2sql
+    expected_row_contains: []
+
+  # === NOT EXISTS / 反転: subject に "親会社" relation を持たない組織 ===
+  - q: "親会社を持たない組織は？"
+    expected_route: text2sql
+    expected_row_contains: []

@@ -1,8 +1,7 @@
-"""質問応答。テンプレート優先 → 検証付き text2sql → 文書全文 → 回答生成。
+"""質問応答。text2sql で構造化取得 → 自己修復 → fallback (FTS のみ)。
 
 CLI:
   python tools/query.py "Acme の CEO は誰？"
-  python tools/query.py --sql "解約率の推移"
 
 サーバからは answer_question() を呼ぶ。
 """
@@ -16,21 +15,6 @@ import config
 import llm
 import db as kg
 
-TEMPLATES = {
-    "relations_of": (
-        "SELECT e1.canonical_name s, r.predicate p, e2.canonical_name o, "
-        "d.slug src, r.status FROM relations r "
-        "JOIN entities e1 ON r.subject_id=e1.id JOIN entities e2 ON r.object_id=e2.id "
-        "JOIN documents d ON r.document_id=d.id "
-        "WHERE (e1.canonical_name LIKE ? OR e2.canonical_name LIKE ?) LIMIT 30"
-    ),
-    "facts_of": (
-        "SELECT e.canonical_name n, f.attribute a, f.value v, d.slug src, f.status "
-        "FROM facts f JOIN entities e ON f.entity_id=e.id "
-        "JOIN documents d ON f.document_id=d.id "
-        "WHERE e.canonical_name LIKE ? LIMIT 30"
-    ),
-}
 
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|pragma|replace)\b", re.I)
 
@@ -187,25 +171,6 @@ def text2sql(question: str):
         return sql, run_ro(sql)
 
 
-def find_entity_term(question: str):
-    db = kg.connect(readonly=True)
-    for r in db.execute("SELECT canonical_name FROM entities WHERE status!='merged'"):
-        if r["canonical_name"] and r["canonical_name"] in question:
-            return r["canonical_name"]
-    return None
-
-
-def template_rows(question: str):
-    term = find_entity_term(question)
-    if not term:
-        return None
-    like = f"%{term}%"
-    db = kg.connect(readonly=True)
-    out = [dict(r) for r in db.execute(TEMPLATES["relations_of"], (like, like))]
-    out += [dict(r) for r in db.execute(TEMPLATES["facts_of"], (like,))]
-    return out or None
-
-
 def fts_docs(question: str, k: int = 4):
     db = kg.connect(readonly=True)
     q = " OR ".join(re.findall(r"\w{2,}", question))[:200] or question
@@ -220,16 +185,13 @@ def fts_docs(question: str, k: int = 4):
     return [{"slug": r["slug"], "snippet": r["s"]} for r in rows]
 
 
-def answer_question(question: str, force_sql: bool = False) -> dict:
+def answer_question(question: str) -> dict:
     """構造化結果・SQL・文書・回答をまとめて返す（サーバ/CLI 共用）。"""
-    sql_used, route, error = None, "template", None
-    rows = None if force_sql else template_rows(question)
-    if rows is None:
-        try:
-            sql_used, rows = text2sql(question)
-            route = "text2sql"
-        except (ValueError, sqlite3.Error) as e:
-            rows, route, error = [], "fallback", f"text2sql 失敗: {e}"
+    sql_used, route, error = None, "text2sql", None
+    try:
+        sql_used, rows = text2sql(question)
+    except (ValueError, sqlite3.Error) as e:
+        rows, route, error = [], "fallback", f"text2sql 失敗: {e}"
     docs = fts_docs(question)
 
     answer = ""
@@ -258,13 +220,10 @@ def answer_question(question: str, force_sql: bool = False) -> dict:
 
 def main():
     args = sys.argv[1:]
-    force = bool(args) and args[0] == "--sql"
-    if force:
-        args = args[1:]
     if not args:
         print(__doc__)
         return
-    res = answer_question(" ".join(args), force_sql=force)
+    res = answer_question(" ".join(args))
     if res["sql"]:
         print(f"[SQL/{res['route']}] {res['sql']}\n")
     if res["error"]:
