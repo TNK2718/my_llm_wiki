@@ -135,11 +135,25 @@
   .cfg .m:last-child{border:0}
   .cfg .m .s{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto;align-self:center}
   .empty{color:var(--faint);font-family:var(--mono);font-size:12px;padding:20px;text-align:center}
-  .item.fail{border-left:2px solid var(--warn)}
   .item .ts{font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:.08em}
   .item .sg{font-family:var(--mono);font-size:10px;color:var(--accent-dim);text-transform:uppercase;letter-spacing:.1em;margin-right:8px}
   .item .tg{font-family:var(--mono);font-size:11px;color:var(--ink)}
   .item .md{font-family:var(--mono);font-size:10px;color:var(--faint);align-self:center}
+  .item.s-good{border-left:2px solid #4dd28c}      /* >=0.9 緑 */
+  .item.s-ok{border-left:2px solid var(--accent-dim)} /* 0.7-0.9 黄緑 */
+  .item.s-warn{border-left:2px solid #e0a64a}      /* 0.5-0.7 橙 */
+  .item.s-bad{border-left:2px solid var(--warn)}   /* <0.5 赤 */
+  .item.s-na{border-left:2px solid var(--line)}    /* スコア無し */
+  .item .scorebox{display:flex;align-items:center;gap:8px;margin-left:auto;align-self:center}
+  .item .sval{font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;
+    color:var(--ink);font-weight:600;letter-spacing:.02em}
+  .item.s-good .sval{color:#4dd28c}
+  .item.s-ok .sval{color:var(--accent)}
+  .item.s-warn .sval{color:#e0a64a}
+  .item.s-bad .sval{color:var(--warn)}
+  .item .hl{font-family:var(--mono);font-size:10.5px;color:var(--dim);margin-top:4px;
+    display:flex;flex-wrap:wrap;gap:8px}
+  .item .hl b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
   .ev-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
   tr.case{cursor:pointer}
   tr.case:hover td{background:var(--panel2)}
@@ -167,6 +181,15 @@
   .step-blocks pre{margin:2px 0 4px;font-family:var(--mono);font-size:11px;color:#c9d4bf;
     background:var(--panel2);border:1px solid var(--line);border-left:2px solid var(--accent-dim);
     padding:8px 10px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+  .gloss{border-bottom:1px dotted var(--accent-dim);cursor:help}
+  #glosstip{position:fixed;display:none;max-width:380px;font-family:var(--mono);font-size:11.5px;
+    line-height:1.55;color:var(--ink);background:var(--panel2);border:1px solid var(--accent-dim);
+    padding:9px 12px;z-index:1000;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.55);
+    white-space:pre-wrap}
+  #glosstip.pinned{border-color:var(--accent);pointer-events:auto}
+  #glosstip b{display:block;color:var(--accent);font-weight:600;letter-spacing:.04em;
+    margin-bottom:4px;font-size:11px;text-transform:none}
+  #glosstip .pin{font-size:10px;color:var(--faint);margin-top:6px;display:block}
 </style>
 </head>
 <body>
@@ -383,6 +406,112 @@ $('#run').onclick=async()=>{
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let evRuns=[], evStage='all', evSelected=null;
 
+// ----- 用語解説 (glossary tooltip) -----
+const GLOSSARY={
+  // 一般メトリクス
+  precision:'適合率 = TP / (TP + FP)。「抽出したもののうち正解だった割合」。誤検出を減らすほど上がる。',
+  recall:'再現率 = TP / (TP + FN)。「正解のうち取れた割合」。取りこぼしを減らすほど上がる。',
+  f1:'F1 = precision と recall の調和平均。両方バランス良く高くないと上がらない。',
+  accuracy:'正解率 = (TP + TN) / 全件。クラス偏りに弱いので precision/recall と併用推奨。',
+  // extract per_case
+  missed:'gold に書かれているのに抽出結果に存在しなかった (false negative)。recall を下げる。',
+  extra:'抽出結果には存在するが gold には無かった (false positive)。precision を下げる。',
+  // query run-list headline & 集約
+  route:'route_accuracy: 期待ルート (text2sql / fallback) と実際が一致した割合。',
+  route_accuracy:'期待ルート (text2sql / fallback) と実際の選択が一致した割合。',
+  sql:'sql_success_rate: text2sql ルートで SQL が構文 OK + 実行成功した割合。',
+  sql_success_rate:'text2sql ルートで SQL が構文 OK + 実行成功した割合。0 行でも実行できれば OK。',
+  row:'row_contains_rate: 生成 SQL の rows 中に gold の expected_row_contains が出現した割合。',
+  row_contains_rate:'生成 SQL の結果 rows のどこかに gold の期待値が現れた割合。列名は不問 (* マッチ)。',
+  doc:'doc_slug_rate: FTS で引いた docs に gold の expected_doc_slugs が含まれた割合。',
+  doc_slug_rate:'FTS 検索で引いた関連 doc に gold が指定した slug が含まれた割合。',
+  // extract headline & 集約
+  ent_f1:'entities_f1: entity 抽出の F1 (gold ↔ 抽出 を name 正規化で突合)。',
+  rel_f1:'relations_f1: (subject, predicate, object) の三項一致での F1。',
+  fact_f1:'facts_f1: (entity, attribute, value) の三項一致での F1。',
+  entities_precision:'entity 抽出の precision: 抽出 entity のうち gold にあった割合。',
+  entities_recall:'entity 抽出の recall: gold の entity のうち抽出できた割合。',
+  entities_f1:'entity 抽出の F1。',
+  relations_precision:'関係 (s,p,o) 三項一致の precision。',
+  relations_recall:'関係 (s,p,o) 三項一致の recall。',
+  relations_f1:'関係 (s,p,o) 三項一致の F1。',
+  facts_precision:'属性 (entity, attribute, value) 三項一致の precision。',
+  facts_recall:'属性 三項一致の recall。',
+  facts_f1:'属性 三項一致の F1。',
+  // dedup
+  acc:'accuracy: same/different 判定の正答率。',
+  lvl:'level_match_rate: 期待した検出経路 (expected_level) と実際の how_b が揃った割合。same 期待ペアのみ評価対象。\n低い = 期待より高コスト経路で拾った (alias で済むはずなのに SLM に頼った 等)、または逆 (SLM 必須のはずが偶然 exact で当たった)。',
+  level_match_rate:'gold の expected_level と実際の how_b の整合率 (same 期待ペアのみ)。\n期待 → 許容 how_b:\n  exact         → exact のみ (正規化キーで一致)\n  alias         → alias のみ (別名辞書で一致)\n  alias-or-llm  → alias / llm-merge どちらでも OK\n  llm-merge     → llm-merge のみ (SLM 必須)\n  未指定        → same と判定されれば OK',
+  expected_level:'gold が「このペアはどの経路で検出されるべきか」を指定する欄。exact / alias / alias-or-llm / llm-merge / 未指定。\n低コスト経路 (exact, alias) で済むものを SLM に頼ると遅く・コストが上がるため、規則整備の質を測る目印になる。',
+  level_match:'このペアの how_b が expected_level の許容範囲内に収まったか (true / false)。same 期待でないペアでは null。',
+  how_a:'a 側を find_or_stage_entity に通した結果: exact / alias / llm-merge / new のいずれか。',
+  how_b:'b 側の同上。a と b の entity_id が一致すれば predicted=same。expected_level と突き合わせて level_match を決める。',
+  exact:'正規化キー完全一致 (法人格・記号などを除去した上で文字列一致)。最も安い検出経路。',
+  alias:'別名辞書一致。canonical 以外の登録 alias が一致。',
+  'llm-merge':'規則で曖昧と判断されたので SLM が adjudicate 呼び出しで same 判定。最もコストが高い経路。',
+  new:'既存実体と一致せず新規登録 (predicted=different と等価)。',
+  // 合成
+  score:'run リスト用の合成スコア = stage の headline 数値の単純平均。色グラデの基準にだけ使う粗い指標。',
+  // trace step kinds
+  question:'評価ケースの質問文を trace の起点として記録。',
+  'llm.ask':'LLM 生成呼び出し。prompt / response / 所要 ms を保存。',
+  'llm.embed':'embedding 取得 (column_hints の同義語抽出に使用)。',
+  'text2sql.sql_raw':'LLM が返した生 SQL (validate 前の文字列)。',
+  'text2sql.validate':'SELECT 限定・複文禁止・LIMIT 注入のチェック結果。',
+  'text2sql.run':'read-only DB で SQL を実行。n_rows と error を記録。',
+  'text2sql.retry_decision':'初回 SQL が error か 0 行だった時の再試行判定理由 (zero_rows / error)。',
+  'text2sql.hints':'column_hints の中身。DB の近い値 (trigram + embed) と列語彙を再試行プロンプトに注入。',
+  'route.fallback':'text2sql が完全失敗して fallback (FTS のみ) に切替。reason は最後の error。',
+  'route.decided':'最終的に採用したルートと結果行数。',
+  'fts.docs':'FTS で引いた関連 doc 一覧 (slugs を記録)。',
+  'answer.failed':'最終回答生成 LLM が失敗 (Ollama 未起動など)。',
+  pair:'dedup の対象ペア (a, b, type) を記録。',
+  'stage.a':'a 側を find_or_stage_entity に通した結果 (entity_id, how)。',
+  'stage.b':'b 側の同上。how_b と expected level の整合性で level_match を判定する。',
+};
+
+function gloss(term, label){
+  // term が glossary に無ければ素の text を返す (副作用ゼロ)
+  if(!(term in GLOSSARY)) return esc(label==null?term:label);
+  return `<span class="gloss" data-term="${esc(term)}">${esc(label==null?term:label)}</span>`;
+}
+
+document.body.insertAdjacentHTML('beforeend','<div id="glosstip"></div>');
+(function(){
+  const tip=document.getElementById('glosstip');
+  let pinned=false;
+  function show(el){
+    const term=el.dataset.term, text=GLOSSARY[term];
+    if(!text) return;
+    tip.innerHTML=`<b>${esc(term)}</b>${esc(text)}${pinned?'<span class="pin">クリックで閉じる</span>':''}`;
+    const r=el.getBoundingClientRect();
+    const w=Math.min(380,window.innerWidth-20);
+    let left=r.left, top=r.bottom+6;
+    if(left+w>window.innerWidth-8) left=window.innerWidth-w-8;
+    tip.style.left=left+'px'; tip.style.top=top+'px'; tip.style.maxWidth=w+'px';
+    tip.style.display='block';
+  }
+  function hide(){ tip.style.display='none'; pinned=false; tip.classList.remove('pinned'); }
+  document.addEventListener('mouseover',e=>{
+    if(pinned) return;
+    const el=e.target.closest('.gloss'); if(el) show(el);
+  });
+  document.addEventListener('mouseout',e=>{
+    if(pinned) return;
+    if(e.target.closest('.gloss')) tip.style.display='none';
+  });
+  document.addEventListener('click',e=>{
+    const el=e.target.closest('.gloss');
+    if(el){
+      e.stopPropagation();
+      if(pinned){ hide(); } else { pinned=true; tip.classList.add('pinned'); show(el); }
+    } else if(pinned && !e.target.closest('#glosstip')){
+      hide();
+    }
+  });
+  window.addEventListener('scroll',()=>{ if(!pinned) hide(); },true);
+})();
+
 async function loadEvalRuns(){
   evRuns=await api('/api/eval/runs');
   const stages=['all','query','extract','dedup'];
@@ -409,14 +538,23 @@ function renderEvalList(){
   $('#evlist').innerHTML=rows.map(r=>{
     const m=r.meta||{};
     const ts=(m.timestamp_utc||'').replace('T',' ').replace(/-(\d\d)-(\d\d)Z$/,':$1:$2Z').slice(0,19);
-    const fail=r.has_failures?' fail':'';
+    const score=(typeof r.score==='number')?r.score:null;
+    const scoreCls=score==null?'s-na':(score>=0.9?'s-good':(score>=0.7?'s-ok':(score>=0.5?'s-warn':'s-bad')));
+    const sval=score==null?'—':score.toFixed(2);
+    const hl=Object.entries(r.headline||{}).map(([k,v])=>
+      `<span>${gloss(k)} <b>${(typeof v==='number')?v.toFixed(2):'—'}</b></span>`
+    ).join('');
     const cur=evSelected===r.filename?' on':'';
-    return `<div class="item${fail}${cur}" data-f="${esc(r.filename)}">
-      <div>
-        <span class="sg">${esc(m.stage||'?')}</span><span class="tg">${esc(m.tag||'-')}</span>
+    return `<div class="item ${scoreCls}${cur}" data-f="${esc(r.filename)}">
+      <div style="flex:1;min-width:0">
+        <div>
+          <span class="sg">${esc(m.stage||'?')}</span><span class="tg">${esc(m.tag||'-')}</span>
+          <span class="md" style="margin-left:8px">${esc(m.model||'')}</span>
+        </div>
         <div class="ts">${esc(ts)}</div>
+        <div class="hl">${hl}</div>
       </div>
-      <span class="md">${esc(m.model||'')}</span>
+      <div class="scorebox">${gloss('score','score')} <span class="sval">${sval}</span></div>
     </div>`;
   }).join('');
   document.querySelectorAll('#evlist .item').forEach(it=>it.onclick=()=>{
@@ -509,14 +647,14 @@ function renderStep(e){
       <b>response</b><pre>${esc(e.response==null?'(なし)':e.response)}</pre>
     </details>`;
   }
-  return `<div class="step ${cls}"><span class="kind">${esc(kind)}</span> ${elapsed} ${meta}${blocks}${llmBody}</div>`;
+  return `<div class="step ${cls}"><span class="kind">${gloss(kind)}</span> ${elapsed} ${meta}${blocks}${llmBody}</div>`;
 }
 
 function bar(name, mean, std){
   const v=Number(mean||0), s=Number(std||0);
   const pct=Math.max(0,Math.min(100, v*100));
   const sd=s?` ± ${s.toFixed(3)}`:'';
-  return `<div class="bar"><span class="name">${esc(name)}</span>
+  return `<div class="bar"><span class="name">${gloss(name)}</span>
     <span class="track"><span class="fill" style="width:${pct}%"></span></span>
     <span class="v">${v.toFixed(3)}${sd}</span></div>`;
 }
@@ -578,7 +716,7 @@ function renderCasesExtract(cases){
     const item={...c}; delete item.label; delete item.category; delete item.kind;
     return `<tr class="case ${c.kind==='missed'?'bad':''}" data-json="${esc(JSON.stringify(c))}">
       <td>${esc(c.category||'-')}</td>
-      <td>${esc(c.kind||'-')}</td>
+      <td>${c.kind?gloss(c.kind):'-'}</td>
       <td>${esc(JSON.stringify(item))}</td>
     </tr>`;
   }).join('');
@@ -592,12 +730,12 @@ function renderCasesDedup(cases){
     return `<tr class="case ${bad?'bad':''}" data-json="${esc(JSON.stringify(c))}">
       <td>${esc(c.a)} ↔ ${esc(c.b)}</td>
       <td>${esc(c.expected||'-')} / ${esc(c.predicted||'-')}</td>
-      <td>${esc(c.how_a||'-')} / ${esc(c.how_b||'-')}</td>
+      <td>${c.how_a?gloss(c.how_a):'-'} / ${c.how_b?gloss(c.how_b):'-'}</td>
       <td>${lvl}</td>
     </tr>`;
   }).join('');
   return `<table><tr><th>a ↔ b</th><th>expected / predicted</th>
-    <th>how_a / how_b</th><th>level</th></tr>${rows}</table>`;
+    <th>${gloss('how_a')} / ${gloss('how_b')}</th><th>${gloss('lvl','level')}</th></tr>${rows}</table>`;
 }
 
 boot(); loadEntities();

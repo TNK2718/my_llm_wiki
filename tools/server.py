@@ -195,6 +195,35 @@ def _summarize_per_case(stage: str, per_case: list) -> tuple[int, bool]:
     return len(per_case), has_fail
 
 
+def _headline(stage: str, agg: dict) -> tuple[dict, float | None]:
+    """run 一覧で表示する代表値と、0〜1 のスコア（色グラデ用）を返す。"""
+    g = lambda k: agg.get(k + "_mean")  # noqa: E731
+    if stage == "query":
+        vals = {
+            "route": g("route_accuracy"),
+            "sql": g("sql_success_rate"),
+            "row": g("row_contains_rate"),
+            "doc": g("doc_slug_rate"),
+        }
+    elif stage == "extract":
+        vals = {
+            "ent_f1": g("entities_f1"),
+            "rel_f1": g("relations_f1"),
+            "fact_f1": g("facts_f1"),
+        }
+    elif stage == "dedup":
+        vals = {
+            "acc": g("accuracy"),
+            "f1": g("f1"),
+            "lvl": g("level_match_rate"),
+        }
+    else:
+        vals = {k[:-5]: v for k, v in agg.items() if k.endswith("_mean")}
+    nums = [v for v in vals.values() if isinstance(v, (int, float))]
+    score = (sum(nums) / len(nums)) if nums else None
+    return vals, score
+
+
 @app.get("/api/eval/runs")
 def eval_runs():
     """eval run の一覧。per_case は含めず軽量サマリのみ返す。"""
@@ -209,13 +238,17 @@ def eval_runs():
             stage = meta.get("stage") or "unknown"
             per_case = result.get("per_case") or []
             n_case, has_fail = _summarize_per_case(stage, per_case)
+            agg = result.get("aggregate") or {}
+            headline, score = _headline(stage, agg)
             items.append({
                 "filename": p.name,
                 "meta": meta,
-                "aggregate": result.get("aggregate") or {},
+                "aggregate": agg,
                 "gold_summary": result.get("gold_summary") or {},
                 "per_case_count": n_case,
                 "has_failures": has_fail,
+                "headline": headline,
+                "score": score,
             })
         except (OSError, json.JSONDecodeError, ValueError) as e:
             items.append({"filename": p.name, "error": str(e)})
