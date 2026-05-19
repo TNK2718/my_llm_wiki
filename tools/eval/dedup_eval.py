@@ -10,6 +10,7 @@ from pathlib import Path
 import config
 import db as kg
 import ingest
+import llm
 
 from tools.eval import fixtures
 from tools.eval import io as eio
@@ -47,8 +48,12 @@ def _eval_pair(pair: dict, adjudicate) -> dict:
     try:
         a, b = pair["a"], pair["b"]
         etype = pair.get("type", "concept")
-        eid_a, how_a = kg.find_or_stage_entity(db, a, etype, adjudicate=adjudicate)
-        eid_b, how_b = kg.find_or_stage_entity(db, b, etype, adjudicate=adjudicate)
+        with llm.trace_session() as trace:
+            llm.note("pair", a=a, b=b, type=etype)
+            eid_a, how_a = kg.find_or_stage_entity(db, a, etype, adjudicate=adjudicate)
+            llm.note("stage.a", entity_id=eid_a, how=how_a)
+            eid_b, how_b = kg.find_or_stage_entity(db, b, etype, adjudicate=adjudicate)
+            llm.note("stage.b", entity_id=eid_b, how=how_b)
         predicted = "same" if eid_a == eid_b else "different"
         expected = pair["expected"]
         expected_level = pair.get("level")
@@ -63,6 +68,7 @@ def _eval_pair(pair: dict, adjudicate) -> dict:
             "how_b": how_b,
             "expected_level": expected_level,
             "level_match": _level_satisfied(expected_level, how_b) if expected == "same" else None,
+            "trace": trace,
         }
     finally:
         db.close()

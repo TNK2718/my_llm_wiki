@@ -6,6 +6,7 @@ from typing import Any
 
 import config
 import ingest
+import llm
 
 from tools.eval import io as eio
 from tools.eval import matchers
@@ -29,7 +30,8 @@ def evaluate(gold_path: Path, runs: int) -> dict:
     per_run: list[dict] = []
     last_per_case: list[dict] = []
     for i in range(runs):
-        ents, rels, facts = _run_once(body)
+        with llm.trace_session() as trace:
+            ents, rels, facts = _run_once(body)
         m_e = matchers.match_entities(g_ent, ents)
         m_r = matchers.match_relations(g_rel, rels)
         m_f = matchers.match_facts(g_fact, facts)
@@ -50,6 +52,7 @@ def evaluate(gold_path: Path, runs: int) -> dict:
             "facts_recall": prf_f["recall"],
             "facts_f1": prf_f["f1"],
             "pred_counts": {"entities": len(ents), "relations": len(rels), "facts": len(facts)},
+            "trace": trace,
         })
 
         last_per_case = []

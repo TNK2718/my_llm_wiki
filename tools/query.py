@@ -180,17 +180,24 @@ def text2sql(question: str):
     """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
     sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+    llm.note("text2sql.sql_raw", sql=sql_raw)
 
     sql, rows, err = None, None, None
     try:
         sql = validate_sql(sql_raw)
+        llm.note("text2sql.validate", attempt=1, sql=sql, ok=True)
         rows = run_ro(sql)
+        llm.note("text2sql.run", attempt=1, n_rows=len(rows))
         if rows:
             return sql, rows
     except (ValueError, sqlite3.Error) as e:
         err = e
+        llm.note("text2sql.validate" if isinstance(e, ValueError) else "text2sql.run",
+                 attempt=1, ok=False, error=f"{type(e).__name__}: {e}")
 
+    llm.note("text2sql.retry_decision", reason="error" if err is not None else "zero_rows")
     hints = column_hints(question)
+    llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
     if not hints:
         if err is not None:
             raise err
@@ -207,10 +214,15 @@ def text2sql(question: str):
         + f"\n\n{hints}"
         + "\n修正後の SQL のみ:"
     )
+    llm.note("text2sql.sql_raw", attempt=2, sql=fix)
     try:
         sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())
+        llm.note("text2sql.validate", attempt=2, sql=sql2, ok=True)
         rows2 = run_ro(sql2)
+        llm.note("text2sql.run", attempt=2, n_rows=len(rows2))
     except (ValueError, sqlite3.Error) as e2:
+        llm.note("text2sql.validate" if isinstance(e2, ValueError) else "text2sql.run",
+                 attempt=2, ok=False, error=f"{type(e2).__name__}: {e2}")
         # 修復 SQL が壊れた: 初回 SQL が有効なら(空でも)それを返す。
         # 初回も無効なら最初の error を上げる（より原因が近い）。
         if err is None:
@@ -238,12 +250,16 @@ def fts_docs(question: str, k: int = 4):
 
 def answer_question(question: str) -> dict:
     """構造化結果・SQL・文書・回答をまとめて返す（サーバ/CLI 共用）。"""
+    llm.note("question", q=question)
     sql_used, route, error = None, "text2sql", None
     try:
         sql_used, rows = text2sql(question)
     except (ValueError, sqlite3.Error) as e:
         rows, route, error = [], "fallback", f"text2sql 失敗: {e}"
+        llm.note("route.fallback", reason=str(e))
+    llm.note("route.decided", route=route, n_rows=len(rows))
     docs = fts_docs(question)
+    llm.note("fts.docs", n_docs=len(docs), slugs=[d.get("slug") for d in docs])
 
     answer = ""
     try:
@@ -257,6 +273,7 @@ def answer_question(question: str) -> dict:
         answer = llm.ask(prompt)
     except Exception as e:  # noqa: BLE001  Ollama 未起動など
         error = (error + " / " if error else "") + f"回答生成失敗: {e}"
+        llm.note("answer.failed", error=str(e))
 
     return {
         "question": question,

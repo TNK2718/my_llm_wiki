@@ -9,6 +9,7 @@ from pathlib import Path
 
 import config
 import db as kg
+import llm
 
 from tools.eval import fixtures
 from tools.eval import io as eio
@@ -49,7 +50,8 @@ def _evaluate_one(qa: dict, answer_question) -> dict:
     expected_contains = qa.get("expected_row_contains") or []
     expected_slugs = qa.get("expected_doc_slugs") or []
 
-    res = answer_question(q)
+    with llm.trace_session() as trace:
+        res = answer_question(q)
     route = res.get("route")
     rows = res.get("rows") or []
     docs = res.get("docs") or []
@@ -84,6 +86,7 @@ def _evaluate_one(qa: dict, answer_question) -> dict:
         "error": error,
         "missed_contains": [spec for spec in expected_contains if spec not in contains_hits],
         "missed_slugs": [s for s in expected_slugs if s not in slug_hits],
+        "trace": trace,
     }
 
 
@@ -169,6 +172,7 @@ def evaluate(gold_path: Path, runs: int) -> dict:
                     "sql_ok": r["sql_ok"],
                     "n_rows": r["n_rows"],
                     "error": r["error"],
+                    "trace": r.get("trace") or [],
                 })
 
     agg = aggregate(per_run, ["route_accuracy", "sql_success_rate", "row_contains_rate", "doc_slug_rate"])

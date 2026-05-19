@@ -5,11 +5,15 @@
 
 DB は read-only で開く。/api/ask のみ Ollama を使う（未起動なら error フィールドで通知）。
 """
+import json
 import sqlite3
+from pathlib import Path
 
 import config
 import db as kg
 import query as q
+
+EVAL_RUNS_DIR = config.ROOT / "data" / "eval" / "runs"
 
 try:
     from fastapi import FastAPI, Body
@@ -171,6 +175,74 @@ def documents():
             "SELECT slug, title, ingested_at FROM documents ORDER BY ingested_at DESC"
         )
     ]
+
+
+def _summarize_per_case(stage: str, per_case: list) -> tuple[int, bool]:
+    """per_case の件数と「失敗を含むか」を返す。stage 別に判定基準を切替。"""
+    if not per_case:
+        return 0, False
+    if stage == "query":
+        has_fail = any(
+            (c.get("error") is not None)
+            or (c.get("expected_route") != c.get("predicted_route"))
+            or (c.get("missed_contains"))
+            or (c.get("missed_slugs"))
+            for c in per_case
+        )
+    else:
+        # extract / dedup の per_case は失敗ケースのみ格納される設計
+        has_fail = True
+    return len(per_case), has_fail
+
+
+@app.get("/api/eval/runs")
+def eval_runs():
+    """eval run の一覧。per_case は含めず軽量サマリのみ返す。"""
+    if not EVAL_RUNS_DIR.is_dir():
+        return []
+    items = []
+    for p in sorted(EVAL_RUNS_DIR.glob("*.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            meta = data.get("meta", {}) or {}
+            result = data.get("result", {}) or {}
+            stage = meta.get("stage") or "unknown"
+            per_case = result.get("per_case") or []
+            n_case, has_fail = _summarize_per_case(stage, per_case)
+            items.append({
+                "filename": p.name,
+                "meta": meta,
+                "aggregate": result.get("aggregate") or {},
+                "gold_summary": result.get("gold_summary") or {},
+                "per_case_count": n_case,
+                "has_failures": has_fail,
+            })
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            items.append({"filename": p.name, "error": str(e)})
+    # 新しい順（timestamp_utc 降順）。error 行は末尾に。
+    items.sort(
+        key=lambda x: (x.get("meta", {}).get("timestamp_utc") or "", x["filename"]),
+        reverse=True,
+    )
+    return items
+
+
+@app.get("/api/eval/run/{filename}")
+def eval_run(filename: str):
+    """1 run の生 JSON を返す。パストラバーサル防止のため厳格に検証。"""
+    if not filename.endswith(".json") or Path(filename).name != filename:
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    target = (EVAL_RUNS_DIR / filename).resolve()
+    try:
+        inside = target.is_relative_to(EVAL_RUNS_DIR.resolve())
+    except AttributeError:  # Py < 3.9 fallback
+        inside = str(target).startswith(str(EVAL_RUNS_DIR.resolve()))
+    if not inside or not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/ask")

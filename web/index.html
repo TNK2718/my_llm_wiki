@@ -135,6 +135,38 @@
   .cfg .m:last-child{border:0}
   .cfg .m .s{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto;align-self:center}
   .empty{color:var(--faint);font-family:var(--mono);font-size:12px;padding:20px;text-align:center}
+  .item.fail{border-left:2px solid var(--warn)}
+  .item .ts{font-family:var(--mono);font-size:10.5px;color:var(--faint);letter-spacing:.08em}
+  .item .sg{font-family:var(--mono);font-size:10px;color:var(--accent-dim);text-transform:uppercase;letter-spacing:.1em;margin-right:8px}
+  .item .tg{font-family:var(--mono);font-size:11px;color:var(--ink)}
+  .item .md{font-family:var(--mono);font-size:10px;color:var(--faint);align-self:center}
+  .ev-meta{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px}
+  tr.case{cursor:pointer}
+  tr.case:hover td{background:var(--panel2)}
+  tr.case.bad td{color:var(--warn)}
+  tr.detail td{background:var(--panel2);border-top:0;padding:14px 18px}
+  tr.detail pre{font-family:var(--mono);font-size:11px;white-space:pre-wrap;color:var(--dim);margin:6px 0}
+  .trace{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+  .step{font-family:var(--mono);font-size:11px;color:var(--ink);border-left:2px solid var(--accent-dim);
+    padding:6px 10px;background:var(--panel)}
+  .step .kind{color:var(--accent);font-weight:600;letter-spacing:.05em}
+  .step.llm{border-left-color:#5ec8ff}
+  .step.llm .kind{color:#5ec8ff}
+  .step.err{border-left-color:var(--warn)}
+  .step.err .kind{color:var(--warn)}
+  .step .dim{color:var(--dim);margin-left:8px;font-size:10.5px}
+  .step details{margin-top:6px}
+  .step details summary{cursor:pointer;color:var(--dim);font-size:10.5px;letter-spacing:.05em}
+  .step details pre{margin:6px 0;font-size:11px;color:#c9d4bf;background:var(--panel2);
+    border:1px solid var(--line);padding:8px 10px;max-height:300px;overflow:auto}
+  .step details b{display:block;color:var(--dim);font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;margin-top:6px}
+  .step-blocks{margin-top:6px;display:flex;flex-direction:column;gap:4px}
+  .step-blocks b{display:block;color:var(--dim);font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase}
+  .step-blocks pre{margin:2px 0 4px;font-family:var(--mono);font-size:11px;color:#c9d4bf;
+    background:var(--panel2);border:1px solid var(--line);border-left:2px solid var(--accent-dim);
+    padding:8px 10px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-all}
 </style>
 </head>
 <body>
@@ -151,6 +183,7 @@
     <a data-v="conflicts">Conflicts</a>
     <div class="sep"></div>
     <a data-v="ask">Ask</a>
+    <a data-v="eval">Eval</a>
   </nav>
   <main>
     <section class="view on" id="overview">
@@ -194,6 +227,20 @@
       <div id="cflist"></div>
     </section>
 
+    <section class="view" id="eval">
+      <h2>Eval Runs</h2>
+      <div class="ent-layout">
+        <div>
+          <div class="filters" id="evfilters"></div>
+          <div class="toolbar"><input type="text" id="evsearch" placeholder="model / tag を検索…"></div>
+          <div class="list" id="evlist"></div>
+        </div>
+        <div class="detail" id="evdetail">
+          <div class="empty">← run を選択</div>
+        </div>
+      </div>
+    </section>
+
     <section class="view" id="ask">
       <h2>Ask</h2>
       <div class="ask-box">
@@ -217,6 +264,7 @@ document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>{
   a.classList.add('on'); $('#'+a.dataset.v).classList.add('on');
   if(a.dataset.v==='graph') drawGraph(0);
   if(a.dataset.v==='conflicts') loadConflicts();
+  if(a.dataset.v==='eval') loadEvalRuns();
 });
 
 async function boot(){
@@ -330,6 +378,227 @@ $('#run').onclick=async()=>{
     r.docs.map(d=>`<div class="row"><b>${d.slug}</b><span>${(d.snippet||'').replace(/</g,'&lt;')}</span></div>`).join('');}
   $('#askout').innerHTML=h;
 };
+
+// ===== Eval =====
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let evRuns=[], evStage='all', evSelected=null;
+
+async function loadEvalRuns(){
+  evRuns=await api('/api/eval/runs');
+  const stages=['all','query','extract','dedup'];
+  $('#evfilters').innerHTML=stages.map(s=>
+    `<span class="f ${s===evStage?'on':''}" data-s="${s}">${s}</span>`).join('');
+  document.querySelectorAll('#evfilters .f').forEach(f=>f.onclick=()=>{
+    evStage=f.dataset.s; renderEvalList();
+  });
+  $('#evsearch').oninput=()=>renderEvalList();
+  renderEvalList();
+}
+
+function renderEvalList(){
+  const q=($('#evsearch').value||'').toLowerCase();
+  const rows=evRuns.filter(r=>{
+    if(r.error) return false;
+    const st=(r.meta||{}).stage||'';
+    if(evStage!=='all' && st!==evStage) return false;
+    if(!q) return true;
+    const blob=`${(r.meta||{}).model||''} ${(r.meta||{}).tag||''}`.toLowerCase();
+    return blob.includes(q);
+  });
+  if(!rows.length){ $('#evlist').innerHTML='<div class="empty">該当 run 無し</div>'; return; }
+  $('#evlist').innerHTML=rows.map(r=>{
+    const m=r.meta||{};
+    const ts=(m.timestamp_utc||'').replace('T',' ').replace(/-(\d\d)-(\d\d)Z$/,':$1:$2Z').slice(0,19);
+    const fail=r.has_failures?' fail':'';
+    const cur=evSelected===r.filename?' on':'';
+    return `<div class="item${fail}${cur}" data-f="${esc(r.filename)}">
+      <div>
+        <span class="sg">${esc(m.stage||'?')}</span><span class="tg">${esc(m.tag||'-')}</span>
+        <div class="ts">${esc(ts)}</div>
+      </div>
+      <span class="md">${esc(m.model||'')}</span>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('#evlist .item').forEach(it=>it.onclick=()=>{
+    evSelected=it.dataset.f;
+    document.querySelectorAll('#evlist .item').forEach(x=>x.classList.remove('on'));
+    it.classList.add('on');
+    showEvalRun(it.dataset.f);
+  });
+}
+
+async function showEvalRun(filename){
+  const data=await api('/api/eval/run/'+encodeURIComponent(filename));
+  if(data.error){ $('#evdetail').innerHTML=`<div class="err">${esc(data.error)}</div>`; return; }
+  const m=data.meta||{}, res=data.result||{};
+  const gs=res.gold_summary||{}, agg=res.aggregate||{}, cases=res.per_case||[];
+  const stage=m.stage||'unknown';
+
+  const goldName=(m.gold_path||'').split(/[\\/]/).pop()||'-';
+  const gitShort=(m.git_rev||'').slice(0,7);
+  const chips=[
+    ['stage',stage],['tag',m.tag],['model',m.model],['runs',m.runs],
+    ['git',gitShort],['t',m.timestamp_utc],['gold',goldName]
+  ].map(([k,v])=>`<span class="chip">${esc(k)} <b>${esc(v??'-')}</b></span>`).join('');
+
+  const goldRow=Object.entries(gs).map(([k,v])=>
+    `<div class="row"><b>${esc(k)}</b><span>${esc(typeof v==='object'?JSON.stringify(v):v)}</span></div>`
+  ).join('')||'<div class="empty">—</div>';
+
+  const aggHtml=renderAggregate(stage, agg);
+  const caseHtml=renderCases(stage, cases);
+  const perRunTraces=(res.per_run||[]).filter(r=>r && r.trace && r.trace.length);
+  let runTraceHtml='';
+  if(perRunTraces.length){
+    runTraceHtml='<div class="sect">Per-run trace</div>'+perRunTraces.map(r=>
+      `<details style="margin:6px 0"><summary class="dim" style="font-family:var(--mono);font-size:11px;cursor:pointer">run ${esc(r.run)} · ${r.trace.length} steps</summary>${renderTrace(r.trace)}</details>`
+    ).join('');
+  }
+
+  $('#evdetail').innerHTML=
+    `<div class="ev-meta">${chips}</div>
+     <div class="sect">Gold summary</div>${goldRow}
+     <div class="sect">Aggregate</div>${aggHtml}
+     ${runTraceHtml}
+     <div class="sect">Per-case (${cases.length})</div>${caseHtml}`;
+
+  // 行クリックで詳細展開: trace タイムライン + raw JSON (折りたたみ)
+  document.querySelectorAll('#evdetail tr.case').forEach(tr=>tr.onclick=()=>{
+    const next=tr.nextElementSibling;
+    if(next && next.classList.contains('detail')){ next.remove(); return; }
+    const obj=JSON.parse(tr.dataset.json);
+    const cols=tr.parentElement.querySelector('tr').children.length;
+    const det=document.createElement('tr');
+    det.className='detail';
+    const traceHtml=renderTrace(obj.trace);
+    const rawHtml=`<details><summary class="dim" style="font-family:var(--mono);font-size:10.5px;color:var(--dim);cursor:pointer;margin-top:12px">raw json</summary><pre>${esc(JSON.stringify(obj,null,2))}</pre></details>`;
+    det.innerHTML=`<td colspan="${cols}"><div class="sect" style="margin:0 0 6px">Trace (${(obj.trace||[]).length} steps)</div>${traceHtml}${rawHtml}</td>`;
+    tr.after(det);
+  });
+}
+
+function renderTrace(trace){
+  if(!trace || !trace.length) return '<div class="empty">trace 無し（古い run か、その経路で LLM/note が走らなかった）</div>';
+  return '<div class="trace">'+trace.map(renderStep).join('')+'</div>';
+}
+
+function renderStep(e){
+  const kind=e.kind||'step';
+  const isLLM=kind.startsWith('llm.');
+  const hasErr=!!e.error;
+  const cls=hasErr?'err':(isLLM?'llm':'');
+  const elapsed=(e.elapsed_ms!=null)?`<span class="dim">${e.elapsed_ms}ms</span>`:'';
+  const skip=new Set(['kind','t_ms','prompt','response','elapsed_ms']);
+  // 「長い / 複数行」の値は inline の dim ではなく pre ブロックに分離して表示
+  const inlineParts=[], blockParts=[];
+  for(const [k,v] of Object.entries(e)){
+    if(skip.has(k)) continue;
+    const sv=(v==null)?'':(typeof v==='object'?JSON.stringify(v,null,2):String(v));
+    if(sv.includes('\n') || sv.length>80){
+      blockParts.push(`<b>${esc(k)}</b><pre>${esc(sv)}</pre>`);
+    } else {
+      inlineParts.push(`<span class="dim">${esc(k)}=${esc(sv)}</span>`);
+    }
+  }
+  const meta=inlineParts.join(' ');
+  const blocks=blockParts.length?`<div class="step-blocks">${blockParts.join('')}</div>`:'';
+  let llmBody='';
+  if(isLLM && (e.prompt||e.response)){
+    llmBody=`<details><summary>prompt / response</summary>
+      <b>prompt</b><pre>${esc(e.prompt||'')}</pre>
+      <b>response</b><pre>${esc(e.response==null?'(なし)':e.response)}</pre>
+    </details>`;
+  }
+  return `<div class="step ${cls}"><span class="kind">${esc(kind)}</span> ${elapsed} ${meta}${blocks}${llmBody}</div>`;
+}
+
+function bar(name, mean, std){
+  const v=Number(mean||0), s=Number(std||0);
+  const pct=Math.max(0,Math.min(100, v*100));
+  const sd=s?` ± ${s.toFixed(3)}`:'';
+  return `<div class="bar"><span class="name">${esc(name)}</span>
+    <span class="track"><span class="fill" style="width:${pct}%"></span></span>
+    <span class="v">${v.toFixed(3)}${sd}</span></div>`;
+}
+
+function renderAggregate(stage, agg){
+  const pick=(k)=>[agg[k+'_mean'], agg[k+'_std']];
+  let keys=[];
+  if(stage==='query'){
+    keys=['route_accuracy','sql_success_rate','row_contains_rate','doc_slug_rate'];
+  } else if(stage==='dedup'){
+    keys=['accuracy','precision','recall','f1','level_match_rate'];
+  } else if(stage==='extract'){
+    keys=[];
+    for(const cat of ['entities','relations','facts'])
+      for(const m of ['precision','recall','f1']) keys.push(`${cat}_${m}`);
+  } else {
+    // 未知 stage は *_mean を機械的に拾う
+    keys=Object.keys(agg).filter(k=>k.endsWith('_mean')).map(k=>k.slice(0,-5));
+  }
+  if(!keys.length) return '<div class="empty">aggregate 無し</div>';
+  return keys.map(k=>{const [mn,sd]=pick(k); return bar(k,mn,sd);}).join('');
+}
+
+function renderCases(stage, cases){
+  if(!cases.length) return '<div class="empty">失敗ケース無し</div>';
+  if(stage==='query') return renderCasesQuery(cases);
+  if(stage==='extract') return renderCasesExtract(cases);
+  if(stage==='dedup') return renderCasesDedup(cases);
+  // fallback: label + raw json
+  const rows=cases.map(c=>`<tr class="case" data-json="${esc(JSON.stringify(c))}">
+    <td>${esc(c.label||'-')}</td></tr>`).join('');
+  return `<table><tr><th>label</th></tr>${rows}</table>`;
+}
+
+function renderCasesQuery(cases){
+  const rows=cases.map(c=>{
+    const routeOk=c.expected_route===c.predicted_route;
+    const bad=!routeOk || c.error || (c.missed_contains||[]).length || (c.missed_slugs||[]).length;
+    const route=`${esc(c.expected_route||'-')} → <b style="color:${routeOk?'var(--ink)':'var(--warn)'}">${esc(c.predicted_route||'-')}</b>`;
+    const sqlOk=c.sql_ok===true?'ok':(c.sql_ok===false?'NG':'-');
+    const row=c.row_contains_rate==null?'-':(c.row_contains_rate).toFixed(2);
+    const miss=(c.missed_contains||[]).map(x=>`${esc(x.column)}=${esc(x.value)}`).join(' / ');
+    return `<tr class="case ${bad?'bad':''}" data-json="${esc(JSON.stringify(c))}">
+      <td>${esc(c.label||'-')}</td>
+      <td>${route}</td>
+      <td>${sqlOk}</td>
+      <td>${row}</td>
+      <td>${esc(miss)}</td>
+      <td>${esc(c.error||'-')}</td>
+    </tr>`;
+  }).join('');
+  return `<table><tr>
+    <th>label</th><th>route exp→pred</th><th>sql</th><th>row%</th>
+    <th>missed_contains</th><th>error</th></tr>${rows}</table>`;
+}
+
+function renderCasesExtract(cases){
+  const rows=cases.map(c=>{
+    const item={...c}; delete item.label; delete item.category; delete item.kind;
+    return `<tr class="case ${c.kind==='missed'?'bad':''}" data-json="${esc(JSON.stringify(c))}">
+      <td>${esc(c.category||'-')}</td>
+      <td>${esc(c.kind||'-')}</td>
+      <td>${esc(JSON.stringify(item))}</td>
+    </tr>`;
+  }).join('');
+  return `<table><tr><th>category</th><th>kind</th><th>item</th></tr>${rows}</table>`;
+}
+
+function renderCasesDedup(cases){
+  const rows=cases.map(c=>{
+    const bad=!c.correct;
+    const lvl=c.level_match===true?'ok':(c.level_match===false?'NG':'-');
+    return `<tr class="case ${bad?'bad':''}" data-json="${esc(JSON.stringify(c))}">
+      <td>${esc(c.a)} ↔ ${esc(c.b)}</td>
+      <td>${esc(c.expected||'-')} / ${esc(c.predicted||'-')}</td>
+      <td>${esc(c.how_a||'-')} / ${esc(c.how_b||'-')}</td>
+      <td>${lvl}</td>
+    </tr>`;
+  }).join('');
+  return `<table><tr><th>a ↔ b</th><th>expected / predicted</th>
+    <th>how_a / how_b</th><th>level</th></tr>${rows}</table>`;
+}
 
 boot(); loadEntities();
 </script>
