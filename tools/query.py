@@ -18,13 +18,31 @@ import db as kg
 
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|pragma|replace)\b", re.I)
 
+# SLM は前置き文・コードフェンス・CTE などを返してくることがあるので、優先度順に
+# 候補を試して最初に当たったものを採用する（Vanna 1.x の extract_sql 流儀）。
+_SQL_PATTERNS = [
+    re.compile(r"```sql\s*(.*?)```", re.DOTALL | re.IGNORECASE),
+    re.compile(r"```\s*(.*?)```", re.DOTALL),
+    # `\b` は Unicode で日本語も語扱いするので、行頭か空白で前置詞を切り捨てる。
+    re.compile(r"(?:^|\s)(WITH\b.*?;)", re.DOTALL | re.IGNORECASE),
+    re.compile(r"(?:^|\s)(SELECT\b.*?;)", re.DOTALL | re.IGNORECASE),
+]
+
+
+def extract_sql(text: str) -> str:
+    for pat in _SQL_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return (m.group(1) if m.groups() else m.group(0)).strip()
+    return text.strip()
+
 
 def validate_sql(sql: str) -> str:
     sql = sql.strip().rstrip(";").strip()
     if ";" in sql:
         raise ValueError("複文は不可")
-    if not re.match(r"(?is)^\s*select\b", sql):
-        raise ValueError("SELECT のみ許可")
+    if not re.match(r"(?is)^\s*(select|with)\b", sql):
+        raise ValueError("SELECT/WITH のみ許可")
     if FORBIDDEN.search(sql):
         raise ValueError("書き込み/DDL 系キーワードは不可")
     if not re.search(r"(?i)\blimit\b", sql):
@@ -179,7 +197,7 @@ def text2sql(question: str):
        できないので、ヒントを与えても 0 行ならそのまま返す。
     """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
-    sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+    sql_raw = extract_sql(llm.ask(tmpl.replace("{QUESTION}", question)))
 
     sql, rows, err = None, None, None
     try:
@@ -208,7 +226,7 @@ def text2sql(question: str):
         + "\n修正後の SQL のみ:"
     )
     try:
-        sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())
+        sql2 = validate_sql(extract_sql(fix))
         rows2 = run_ro(sql2)
     except (ValueError, sqlite3.Error) as e2:
         # 修復 SQL が壊れた: 初回 SQL が有効なら(空でも)それを返す。
