@@ -139,6 +139,8 @@
   .item .sg{font-family:var(--mono);font-size:10px;color:var(--accent-dim);text-transform:uppercase;letter-spacing:.1em;margin-right:8px}
   .item .tg{font-family:var(--mono);font-size:11px;color:var(--ink)}
   .item .md{font-family:var(--mono);font-size:10px;color:var(--faint);align-self:center}
+  .item .gd{font-family:var(--mono);font-size:10.5px;color:var(--accent-dim);align-self:center;margin-left:8px}
+  .item .gd b{color:var(--ink);font-weight:500}
   .item.s-good{border-left:2px solid #4dd28c}      /* >=0.9 緑 */
   .item.s-ok{border-left:2px solid var(--accent-dim)} /* 0.7-0.9 黄緑 */
   .item.s-warn{border-left:2px solid #e0a64a}      /* 0.5-0.7 橙 */
@@ -522,18 +524,21 @@ async function loadEvalRuns(){
 
 function renderEvalList(){
   const q=($('#evsearch').value||'').toLowerCase();
+  const goldOf=m=>((m.gold_path||'').split(/[\\/]/).pop()||'').replace(/\.ya?ml$/,'');
   const rows=evRuns.filter(r=>{
     if(r.error) return false;
-    const st=(r.meta||{}).stage||'';
+    const m=r.meta||{};
+    const st=m.stage||'';
     if(evStage!=='all' && st!==evStage) return false;
     if(!q) return true;
-    const blob=`${(r.meta||{}).model||''} ${(r.meta||{}).tag||''}`.toLowerCase();
+    const blob=`${m.model||''} ${m.tag||''} ${goldOf(m)}`.toLowerCase();
     return blob.includes(q);
   });
   if(!rows.length){ $('#evlist').innerHTML='<div class="empty">該当 run 無し</div>'; return; }
   $('#evlist').innerHTML=rows.map(r=>{
     const m=r.meta||{};
     const ts=(m.timestamp_utc||'').replace('T',' ').replace(/-(\d\d)-(\d\d)Z$/,':$1:$2Z').slice(0,19);
+    const gold=goldOf(m);
     const score=(typeof r.score==='number')?r.score:null;
     const scoreCls=score==null?'s-na':(score>=0.9?'s-good':(score>=0.7?'s-ok':(score>=0.5?'s-warn':'s-bad')));
     const sval=score==null?'—':score.toFixed(2);
@@ -546,6 +551,7 @@ function renderEvalList(){
         <div>
           <span class="sg">${esc(m.stage||'?')}</span><span class="tg">${esc(m.tag||'-')}</span>
           <span class="md" style="margin-left:8px">${esc(m.model||'')}</span>
+          <span class="gd">gold: <b>${esc(gold||'-')}</b></span>
         </div>
         <div class="ts">${esc(ts)}</div>
         <div class="hl">${hl}</div>
