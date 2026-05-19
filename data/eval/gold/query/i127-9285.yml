@@ -15,24 +15,20 @@ extract_gold: data/eval/gold/extract/i127-9285.yml
 qa:
   # === 同義語橋渡し: トライアル → 評価版 ===
   - q: "Bobの無料トライアル版って？"
-    expected_route: text2sql
     expected_row_contains:
       - { column: "*", value: "無料評価版" }
 
   # === 同義語橋渡し: 試用期間 → 評価期間 ===
   - q: "Bob 無料評価版の試用期間は？"
-    expected_route: text2sql
     expected_row_contains:
       - { column: "*", value: "30 日間" }
 
   # === 別名解決: "IBM Bob" は canonical だが質問は単に "Bob" ===
   - q: "Bob の SLA 違反時のクレジットは何パーセント？"
-    expected_route: text2sql
     expected_row_contains:
       - { column: "*", value: "2%" }
 
   # === 値域語彙: enterprise の課金粒度 ===
   - q: "Bob Enterprise の超過課金の単位は？"
-    expected_route: text2sql
     expected_row_contains:
       - { column: "*", value: "1000 リソース単位パック" }

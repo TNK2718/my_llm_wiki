@@ -251,13 +251,12 @@ def fts_docs(question: str, k: int = 4):
 def answer_question(question: str) -> dict:
     """構造化結果・SQL・文書・回答をまとめて返す（サーバ/CLI 共用）。"""
     llm.note("question", q=question)
-    sql_used, route, error = None, "text2sql", None
+    sql_used, error = None, None
     try:
         sql_used, rows = text2sql(question)
     except (ValueError, sqlite3.Error) as e:
-        rows, route, error = [], "fallback", f"text2sql 失敗: {e}"
-        llm.note("route.fallback", reason=str(e))
-    llm.note("route.decided", route=route, n_rows=len(rows))
+        rows, error = [], f"text2sql 失敗: {e}"
+        llm.note("text2sql.fallback", reason=str(e))
     docs = fts_docs(question)
     llm.note("fts.docs", n_docs=len(docs), slugs=[d.get("slug") for d in docs])
 
@@ -277,7 +276,6 @@ def answer_question(question: str) -> dict:
 
     return {
         "question": question,
-        "route": route,
         "sql": sql_used,
         "rows": rows,
         "docs": docs,
@@ -293,7 +291,7 @@ def main():
         return
     res = answer_question(" ".join(args))
     if res["sql"]:
-        print(f"[SQL/{res['route']}] {res['sql']}\n")
+        print(f"[SQL] {res['sql']}\n")
     if res["error"]:
         print(f"[警告] {res['error']}\n")
     print(res["answer"] or "(回答生成不可)")

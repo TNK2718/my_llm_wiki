@@ -389,8 +389,7 @@ $('#run').onclick=async()=>{
   catch(e){ $('#askout').innerHTML='<div class="err">サーバ通信失敗</div>'; return; }
   let h='';
   if(r.error) h+=`<div class="err">⚠ ${r.error}</div>`;
-  h+=`<div class="meta"><span class="badge r">route: ${r.route||'-'}</span>`+
-     `<span class="badge">rows: ${(r.rows||[]).length}</span>`+
+  h+=`<div class="meta"><span class="badge">rows: ${(r.rows||[]).length}</span>`+
      `<span class="badge">docs: ${(r.docs||[]).length}</span></div>`;
   h+=`<div class="ans">${(r.answer||'(回答生成不可 — Ollama 未起動の可能性)').replace(/</g,'&lt;')}</div>`;
   if(r.sql) h+=`<div class="sect">生成 SQL（read-only 検証済）</div><pre class="sql">${r.sql.replace(/</g,'&lt;')}</pre>`;
@@ -417,10 +416,8 @@ const GLOSSARY={
   missed:'gold に書かれているのに抽出結果に存在しなかった (false negative)。recall を下げる。',
   extra:'抽出結果には存在するが gold には無かった (false positive)。precision を下げる。',
   // query run-list headline & 集約
-  route:'route_accuracy: 期待ルート (text2sql / fallback) と実際が一致した割合。',
-  route_accuracy:'期待ルート (text2sql / fallback) と実際の選択が一致した割合。',
-  sql:'sql_success_rate: text2sql ルートで SQL が構文 OK + 実行成功した割合。',
-  sql_success_rate:'text2sql ルートで SQL が構文 OK + 実行成功した割合。0 行でも実行できれば OK。',
+  sql:'sql_success_rate: SQL が構文 OK + 実行成功した割合。',
+  sql_success_rate:'SQL が構文 OK + 実行成功した割合。0 行でも実行できれば OK。text2sql 例外で FTS のみに落ちた場合は失敗扱い。',
   row:'row_contains_rate: 生成 SQL の rows 中に gold の expected_row_contains が出現した割合。',
   row_contains_rate:'生成 SQL の結果 rows のどこかに gold の期待値が現れた割合。列名は不問 (* マッチ)。',
   doc:'doc_slug_rate: FTS で引いた docs に gold の expected_doc_slugs が含まれた割合。',
@@ -461,8 +458,7 @@ const GLOSSARY={
   'text2sql.run':'read-only DB で SQL を実行。n_rows と error を記録。',
   'text2sql.retry_decision':'初回 SQL が error か 0 行だった時の再試行判定理由 (zero_rows / error)。',
   'text2sql.hints':'column_hints の中身。DB の近い値 (trigram + embed) と列語彙を再試行プロンプトに注入。',
-  'route.fallback':'text2sql が完全失敗して fallback (FTS のみ) に切替。reason は最後の error。',
-  'route.decided':'最終的に採用したルートと結果行数。',
+  'text2sql.fallback':'text2sql が完全失敗して FTS のみで継続。reason は最後の error。',
   'fts.docs':'FTS で引いた関連 doc 一覧 (slugs を記録)。',
   'answer.failed':'最終回答生成 LLM が失敗 (Ollama 未起動など)。',
   pair:'dedup の対象ペア (a, b, type) を記録。',
@@ -663,7 +659,7 @@ function renderAggregate(stage, agg){
   const pick=(k)=>[agg[k+'_mean'], agg[k+'_std']];
   let keys=[];
   if(stage==='query'){
-    keys=['route_accuracy','sql_success_rate','row_contains_rate','doc_slug_rate'];
+    keys=['sql_success_rate','row_contains_rate','doc_slug_rate'];
   } else if(stage==='dedup'){
     keys=['accuracy','precision','recall','f1','level_match_rate'];
   } else if(stage==='extract'){
@@ -691,15 +687,12 @@ function renderCases(stage, cases){
 
 function renderCasesQuery(cases){
   const rows=cases.map(c=>{
-    const routeOk=c.expected_route===c.predicted_route;
-    const bad=!routeOk || c.error || (c.missed_contains||[]).length || (c.missed_slugs||[]).length;
-    const route=`${esc(c.expected_route||'-')} → <b style="color:${routeOk?'var(--ink)':'var(--warn)'}">${esc(c.predicted_route||'-')}</b>`;
+    const bad=c.sql_ok===false || c.error || (c.missed_contains||[]).length || (c.missed_slugs||[]).length;
     const sqlOk=c.sql_ok===true?'ok':(c.sql_ok===false?'NG':'-');
     const row=c.row_contains_rate==null?'-':(c.row_contains_rate).toFixed(2);
     const miss=(c.missed_contains||[]).map(x=>`${esc(x.column)}=${esc(x.value)}`).join(' / ');
     return `<tr class="case ${bad?'bad':''}" data-json="${esc(JSON.stringify(c))}">
       <td>${esc(c.label||'-')}</td>
-      <td>${route}</td>
       <td>${sqlOk}</td>
       <td>${row}</td>
       <td>${esc(miss)}</td>
@@ -707,7 +700,7 @@ function renderCasesQuery(cases){
     </tr>`;
   }).join('');
   return `<table><tr>
-    <th>label</th><th>route exp→pred</th><th>sql</th><th>row%</th>
+    <th>label</th><th>sql</th><th>row%</th>
     <th>missed_contains</th><th>error</th></tr>${rows}</table>`;
 }
 

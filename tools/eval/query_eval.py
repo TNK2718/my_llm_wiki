@@ -46,13 +46,11 @@ def _row_contains_match(rows: list[dict], spec: dict) -> bool:
 
 def _evaluate_one(qa: dict, answer_question) -> dict:
     q = qa["q"]
-    expected_route = qa.get("expected_route")
     expected_contains = qa.get("expected_row_contains") or []
     expected_slugs = qa.get("expected_doc_slugs") or []
 
     with llm.trace_session() as trace:
         res = answer_question(q)
-    route = res.get("route")
     rows = res.get("rows") or []
     docs = res.get("docs") or []
     sql = res.get("sql")
@@ -68,16 +66,11 @@ def _evaluate_one(qa: dict, answer_question) -> dict:
     slug_hits = [s for s in expected_slugs if s in pred_slugs]
     slug_rate = (len(slug_hits) / len(expected_slugs)) if expected_slugs else None
 
-    # SQL 実行成功 (route が text2sql/fallback のときのみ意味がある)
-    sql_ok = None
-    if route == "text2sql":
-        sql_ok = bool(sql) and (error is None or "text2sql 失敗" not in (error or ""))
+    # SQL 実行成功: sql が生成されかつ text2sql 例外 fallback でないこと。
+    sql_ok = bool(sql) and (error is None or "text2sql 失敗" not in (error or ""))
 
     return {
         "q": q,
-        "expected_route": expected_route,
-        "predicted_route": route,
-        "route_match": (expected_route is None) or (expected_route == route),
         "sql": sql,
         "sql_ok": sql_ok,
         "n_rows": len(rows),
@@ -96,9 +89,7 @@ def _run_once(qa_list: list[dict]) -> dict:
 
     results = [_evaluate_one(qa, q_mod.answer_question) for qa in qa_list]
     n = len(results)
-    route_correct = sum(1 for r in results if r["route_match"])
-    sql_attempts = [r for r in results if r["sql_ok"] is not None]
-    sql_ok_count = sum(1 for r in sql_attempts if r["sql_ok"])
+    sql_ok_count = sum(1 for r in results if r["sql_ok"])
     contains_eligible = [r for r in results if r["row_contains_rate"] is not None]
     contains_avg = (
         sum(r["row_contains_rate"] for r in contains_eligible) / len(contains_eligible)
@@ -114,8 +105,7 @@ def _run_once(qa_list: list[dict]) -> dict:
 
     return {
         "results": results,
-        "route_accuracy": round(route_correct / n, 4) if n else 0.0,
-        "sql_success_rate": round(sql_ok_count / len(sql_attempts), 4) if sql_attempts else 0.0,
+        "sql_success_rate": round(sql_ok_count / n, 4) if n else 0.0,
         "row_contains_rate": round(contains_avg, 4),
         "doc_slug_rate": round(slug_avg, 4),
     }
@@ -146,7 +136,6 @@ def evaluate(gold_path: Path, runs: int) -> dict:
         run = _run_once(qa_list)
         per_run.append({
             "run": i + 1,
-            "route_accuracy": run["route_accuracy"],
             "sql_success_rate": run["sql_success_rate"],
             "row_contains_rate": run["row_contains_rate"],
             "doc_slug_rate": run["doc_slug_rate"],
@@ -154,16 +143,13 @@ def evaluate(gold_path: Path, runs: int) -> dict:
         last_per_case = []
         for r in run["results"]:
             ok = (
-                r["route_match"]
+                r["sql_ok"]
                 and (r["row_contains_rate"] in (None, 1.0))
                 and (r["doc_slug_rate"] in (None, 1.0))
-                and (r["sql_ok"] in (None, True))
             )
             if not ok:
                 last_per_case.append({
                     "label": f"q: {r['q']}",
-                    "expected_route": r["expected_route"],
-                    "predicted_route": r["predicted_route"],
                     "row_contains_rate": r["row_contains_rate"],
                     "doc_slug_rate": r["doc_slug_rate"],
                     "missed_contains": r["missed_contains"],
@@ -175,7 +161,7 @@ def evaluate(gold_path: Path, runs: int) -> dict:
                     "trace": r.get("trace") or [],
                 })
 
-    agg = aggregate(per_run, ["route_accuracy", "sql_success_rate", "row_contains_rate", "doc_slug_rate"])
+    agg = aggregate(per_run, ["sql_success_rate", "row_contains_rate", "doc_slug_rate"])
     return {
         "gold_summary": {
             "n_qa": len(qa_list),
@@ -191,7 +177,6 @@ def to_markdown_table(result: dict) -> list[list]:
     a = result["aggregate"]
     return [
         ["metric", "mean ± std"],
-        ["route_accuracy",    f"{a.get('route_accuracy_mean', 0):.3f} ± {a.get('route_accuracy_std', 0):.3f}"],
         ["sql_success_rate",  f"{a.get('sql_success_rate_mean', 0):.3f} ± {a.get('sql_success_rate_std', 0):.3f}"],
         ["row_contains_rate", f"{a.get('row_contains_rate_mean', 0):.3f} ± {a.get('row_contains_rate_std', 0):.3f}"],
         ["doc_slug_rate",     f"{a.get('doc_slug_rate_mean', 0):.3f} ± {a.get('doc_slug_rate_std', 0):.3f}"],

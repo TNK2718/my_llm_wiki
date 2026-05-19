@@ -89,7 +89,7 @@ python -m tools.eval extract --gold data/eval/gold/extract/acme-overview.yml --r
 python -m tools.eval dedup   --gold data/eval/gold/dedup/pairs.yml            # SLM 込み
 python -m tools.eval dedup   --gold data/eval/gold/dedup/pairs.yml --no-adjudicate  # 規則のみ
 
-# Query (route 一致率・SQL 実行成功率・期待行/出典含有率)
+# Query (SQL 実行成功率・期待行/出典含有率)
 python -m tools.eval query   --gold data/eval/gold/query/acme-overview.yml --runs 3
 ```
 

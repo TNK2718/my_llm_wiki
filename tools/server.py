@@ -184,7 +184,7 @@ def _summarize_per_case(stage: str, per_case: list) -> tuple[int, bool]:
     if stage == "query":
         has_fail = any(
             (c.get("error") is not None)
-            or (c.get("expected_route") != c.get("predicted_route"))
+            or (c.get("sql_ok") is False)
             or (c.get("missed_contains"))
             or (c.get("missed_slugs"))
             for c in per_case
@@ -200,7 +200,6 @@ def _headline(stage: str, agg: dict) -> tuple[dict, float | None]:
     g = lambda k: agg.get(k + "_mean")  # noqa: E731
     if stage == "query":
         vals = {
-            "route": g("route_accuracy"),
             "sql": g("sql_success_rate"),
             "row": g("row_contains_rate"),
             "doc": g("doc_slug_rate"),
