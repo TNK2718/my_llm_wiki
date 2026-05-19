@@ -613,7 +613,10 @@ async function showEvalRun(filename){
 
 function renderTrace(trace){
   if(!trace || !trace.length) return '<div class="empty">trace 無し（古い run か、その経路で LLM/note が走らなかった）</div>';
-  return '<div class="trace">'+trace.map(renderStep).join('')+'</div>';
+  // 旧 run 互換: 廃止された route.* ステップは表示しない。
+  const filtered=trace.filter(e=>!String(e.kind||'').startsWith('route.'));
+  if(!filtered.length) return '<div class="empty">trace 無し</div>';
+  return '<div class="trace">'+filtered.map(renderStep).join('')+'</div>';
 }
 
 function renderStep(e){
