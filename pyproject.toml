@@ -12,6 +12,8 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pyyaml",
+    "pydantic>=2",
+    "sqlglot",
 ]
 
 [tool.uv]

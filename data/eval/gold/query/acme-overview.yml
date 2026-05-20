@@ -1,45 +1,51 @@
-# Query evaluator のゴールド。fixture (data/eval/fixtures/<fixture>) を前提とする。
-# fixture は同名 extract gold から決定的に build される（fixtures.build_fixture）。
-#
-# 設計方針:
-# - 全質問は text2sql でまず SQL 生成・実行され、例外時のみ FTS のみで継続する固定フロー。
-#   主シグナルは sql_success_rate (SQL 実行成功率) と row_contains_rate。
-# - SLM 生成 SQL の列名は予測困難なので expected_row_contains は空に固定する。
-# - expected_doc_slugs は FTS5 の日本語トークナイズ依存で不安定なため指定しない。
-schema_version: 1
+# Typed-schema query gold (docs/typed-schema-design.md §8 linter 準拠)。
+#   - range/比較 predicate は canonical 表 (person.birth_date, organization.founded_year 等) にのみ
+#   - claims を引くときは status フィルタ必須
+#   - LIKE wildcard は canonical_name/alias のみ (claims.value には不可)
+schema_version: 2
 fixture: acme.sqlite
 extract_gold: data/eval/gold/extract/acme-overview.yml
 
 qa:
-  # === scalar filter: 数値比較 (value は "120名" の文字列なので CAST or 桁抽出が必要) ===
-  - q: "従業員数が100名以上の会社は？"
+  # === employment 経由 (CEO は誰) ===
+  - q: "アクメ株式会社の CEO は誰？"
+    expected_row_contains:
+      - {value: "山田"}
+
+  # === employment 経由 (Acme alias 解決) ===
+  - q: "アクメの CTO は誰？"
+    expected_row_contains:
+      - {value: "鈴木"}
+
+  # === manufacturing (主力製品の製造元) ===
+  - q: "SmartScan を作っているのは？"
+    expected_row_contains:
+      - {value: "アクメ"}
+
+  # === organization canonical 列 range/比較 ===
+  - q: "本社が東京都にある会社は？"
+    expected_row_contains:
+      - {value: "アクメ"}
+
+  - q: "2015 年以降に設立された会社は？"
+    expected_row_contains:
+      - {value: "アクメ"}
+
+  # === org_hierarchy ===
+  - q: "アクメ株式会社の親会社は？"
+    expected_row_contains:
+      - {value: "グローバルテック"}
+
+  # === count ===
+  - q: "登録されている person の数は？"
     expected_row_contains: []
 
-  # === scalar filter: 文字列部分一致 (value LIKE '%東京%') ===
-  - q: "本社が東京都にある会社を教えて"
-    expected_row_contains: []
+  # === claims 履歴 (linter R2 例) ===
+  - q: "山田 太郎の役職の履歴は？"
+    expected_row_contains:
+      - {value: "CEO"}
 
-  # === predicate filter: 述語が "親会社" の relation を列挙 ===
-  - q: "親会社を持つ組織は？"
-    expected_row_contains: []
-
-  # === predicate filter (双方向 join): 業務提携の subject/object ペア ===
-  - q: "業務提携している組織のペアは？"
-    expected_row_contains: []
-
-  # === aggregation: COUNT(*) WHERE type='person' ===
-  - q: "登録されている人物は何名？"
-    expected_row_contains: []
-
-  # === aggregation: DISTINCT 値の列挙 ===
-  - q: "登録されている本社所在地の一覧は？"
-    expected_row_contains: []
-
-  # === alias 解決: entity を短縮表記で言及。text2sql 側で
-  #     entity_aliases LIKE か canonical_name LIKE が必要。
-  - q: "アクメの主力製品は？"
-    expected_row_contains: []
-
-  # === NOT EXISTS / 反転: subject に "親会社" relation を持たない組織 ===
-  - q: "親会社を持たない組織は？"
-    expected_row_contains: []
+schema_proposals:
+  # 「業務提携」「共同推進」は weak_relations に積まれ、N>=5 で proposal 化される想定。
+  # この単一文書では閾値に満たないので proposal 期待値は無し。
+  expected: []

@@ -1,41 +1,62 @@
-# Graph 抽出 evaluator のゴールド。
-# data/eval/sources/acme-overview.md から人手アノテーション。
-# 振り分けは prompts/extract_graph.txt のルールに準拠:
-#   - スカラ値 (数値・地名等) → facts
-#   - 別実体への参照 (人・組織・製品) → relations
-schema_version: 1
+# Typed-schema extract gold (docs/typed-schema-design.md)。
+# starter: person / organization / product / project / + employment / manufacturing / org_hierarchy
+# 旧 generic facts/relations は廃止。属性は entity.attributes、非 starter 関係は weak_relations へ。
+schema_version: 2
 doc_slug: acme-overview
 source: data/eval/sources/acme-overview.md
 
 entities:
-  - name: "アクメ株式会社"
-    type: org
-    aliases: ["Acme Inc.", "アクメ"]   # 別表記が出ても OK
-  - name: "山田 太郎"
-    type: person
+  - proposed_type: organization
+    canonical_name: "アクメ株式会社"
+    aliases: ["Acme Inc.", "アクメ"]
+    attributes:
+      org_type: company
+      founded_year: 2015
+      headquarters: "東京都港区"
+  - proposed_type: person
+    canonical_name: "山田 太郎"
     aliases: ["山田太郎"]
-  - name: "鈴木 花子"
-    type: person
+  - proposed_type: person
+    canonical_name: "鈴木 花子"
     aliases: ["鈴木花子"]
-  - name: "SmartScan"
-    type: product
+  - proposed_type: product
+    canonical_name: "SmartScan"
     aliases: ["Smart Scan"]
-  - name: "グローバルテック社"
-    type: org
+    attributes:
+      category: "異常検知"
+  - proposed_type: organization
+    canonical_name: "グローバルテック社"
     aliases: ["グローバルテック"]
-  - name: "ベータ製造株式会社"
-    type: org
+    attributes:
+      org_type: company
+      headquarters: "シンガポール"
+  - proposed_type: organization
+    canonical_name: "ベータ製造株式会社"
     aliases: ["ベータ製造"]
+    attributes:
+      org_type: company
 
 relations:
-  - {subject: "アクメ株式会社", predicate: "CEO",       object: "山田 太郎"}
-  - {subject: "アクメ株式会社", predicate: "CTO",       object: "鈴木 花子"}
-  - {subject: "アクメ株式会社", predicate: "主力製品",  object: "SmartScan"}
-  - {subject: "アクメ株式会社", predicate: "親会社",    object: "グローバルテック社"}
-  - {subject: "アクメ株式会社", predicate: "業務提携",  object: "ベータ製造株式会社"}
+  - proposed_junction: employment
+    from: "山田 太郎"
+    to: "アクメ株式会社"
+    attributes: {role: "CEO"}
+  - proposed_junction: employment
+    from: "鈴木 花子"
+    to: "アクメ株式会社"
+    attributes: {role: "CTO"}
+  - proposed_junction: manufacturing
+    from: "SmartScan"
+    to: "アクメ株式会社"
+  - proposed_junction: org_hierarchy
+    from: "グローバルテック社"
+    to: "アクメ株式会社"   # parent → child
 
-facts:
-  - {entity: "アクメ株式会社",     attribute: "設立年",     value: "2015年"}
-  - {entity: "アクメ株式会社",     attribute: "本社所在地", value: "東京都港区"}
-  - {entity: "アクメ株式会社",     attribute: "従業員数",   value: "120名"}
-  - {entity: "グローバルテック社", attribute: "本社所在地", value: "シンガポール"}
+weak_relations:
+  # 業務提携・共同推進は starter junction には無いので weak へ
+  - subject: "アクメ株式会社"
+    predicate: "業務提携"
+    object: "ベータ製造株式会社"
+  - subject: "アクメ株式会社"
+    predicate: "共同推進"
+    object: "ベータ製造株式会社"

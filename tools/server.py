@@ -1,184 +1,341 @@
-"""ダッシュボード用 API + 静的フロント配信。
+"""Typed-schema KG ダッシュボード用 API + 静的フロント配信.
 
-  pip install fastapi uvicorn
   python tools/server.py        # http://127.0.0.1:8000
 
-DB は read-only で開く。/api/ask のみ Ollama を使う（未起動なら error フィールドで通知）。
+DB は read-only で開く (mutating endpoint は別接続で書込)。
 """
+from __future__ import annotations
+
 import json
-import sqlite3
 from pathlib import Path
 
 import config
 import db as kg
+import proposal_review as pr
 import query as q
 
 EVAL_RUNS_DIR = config.ROOT / "data" / "eval" / "runs"
 
 try:
-    from fastapi import FastAPI, Body
+    from fastapi import Body, FastAPI
     from fastapi.responses import FileResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     import uvicorn
 except ImportError:
     raise SystemExit("pip install fastapi uvicorn を実行してください")
 
-app = FastAPI(title="LLM Wiki KG Dashboard")
+app = FastAPI(title="LLM Wiki Typed KG Dashboard")
 
 
 def ro():
     return kg.connect(readonly=True)
 
 
+def rw():
+    return kg.connect(readonly=False)
+
+
+# ---------- stats ----------
 @app.get("/api/stats")
 def stats():
     db = ro()
     g = lambda s: db.execute(s).fetchone()[0]  # noqa: E731
-    rel_c, fact_c = kg.open_conflicts(db)
+    counts = {tbl: g(f"SELECT COUNT(*) FROM {tbl}") for tbl in kg.ENTITY_TABLES}
+    relation_counts = {tbl: g(f"SELECT COUNT(*) FROM {tbl}") for tbl in kg.RELATION_CLAIM_COLUMNS}
     return {
-        "documents": g("SELECT COUNT(*) FROM documents"),
-        "entities": g("SELECT COUNT(*) FROM entities WHERE status!='merged'"),
-        "relations": g("SELECT COUNT(*) FROM relations"),
-        "facts": g("SELECT COUNT(*) FROM facts"),
-        "conflicts": len(rel_c) + len(fact_c),
-        "by_type": [
-            dict(r)
-            for r in db.execute(
-                "SELECT type, COUNT(*) n FROM entities WHERE status!='merged' "
-                "GROUP BY type ORDER BY n DESC"
-            )
-        ],
+        "documents": g("SELECT COUNT(*) FROM documents WHERE id != 1"),  # __human__ 除外
+        "entities": counts,
+        "relations": relation_counts,
+        "weak_relations": g("SELECT COUNT(*) FROM weak_relations WHERE promoted_to IS NULL"),
+        "pending_proposals": g("SELECT COUNT(*) FROM schema_proposals WHERE status='pending'"),
+        "pending_staging": g("SELECT COUNT(*) FROM staging_extractions WHERE status='pending'"),
+        "open_conflicts": g("SELECT COUNT(*) FROM conflict_groups WHERE resolved_at IS NULL"),
     }
 
 
-@app.get("/api/entities")
-def entities(q: str = "", type: str = ""):
+# ---------- 型別 entity 一覧 / 詳細 ----------
+@app.get("/api/{table}/list")
+def entity_list(table: str, q: str = ""):
+    if table not in kg.ENTITY_TABLES:
+        return JSONResponse({"error": "unknown table"}, status_code=400)
     db = ro()
-    sql = "SELECT id, canonical_name, type, status FROM entities WHERE status!='merged'"
-    args = []
+    sql = f"SELECT id, canonical_name FROM {table}"
+    args: list = []
     if q:
-        sql += " AND canonical_name LIKE ?"
+        sql += " WHERE canonical_name LIKE ?"
         args.append(f"%{q}%")
-    if type:
-        sql += " AND type=?"
-        args.append(type)
     sql += " ORDER BY canonical_name LIMIT 300"
     return [dict(r) for r in db.execute(sql, args)]
 
 
-@app.get("/api/entity/{eid}")
-def entity(eid: int):
+@app.get("/api/{table}/{eid}")
+def entity_detail(table: str, eid: int):
+    if table not in kg.ENTITY_TABLES:
+        return JSONResponse({"error": "unknown table"}, status_code=400)
     db = ro()
-    e = db.execute("SELECT * FROM entities WHERE id=?", (eid,)).fetchone()
+    e = db.execute(f"SELECT * FROM {table} WHERE id=?", (eid,)).fetchone()
     if not e:
         return JSONResponse({"error": "not found"}, status_code=404)
-    rel = db.execute(
-        "SELECT r.predicate p, e2.canonical_name o, e2.id oid, d.slug src, r.status st "
-        "FROM relations r JOIN entities e2 ON r.object_id=e2.id "
-        "JOIN documents d ON r.document_id=d.id WHERE r.subject_id=?",
-        (eid,),
-    ).fetchall()
-    inc = db.execute(
-        "SELECT r.predicate p, e1.canonical_name s, e1.id sid, d.slug src, r.status st "
-        "FROM relations r JOIN entities e1 ON r.subject_id=e1.id "
-        "JOIN documents d ON r.document_id=d.id WHERE r.object_id=?",
-        (eid,),
-    ).fetchall()
-    facts = db.execute(
-        "SELECT f.attribute a, f.value v, d.slug src, f.status st "
-        "FROM facts f JOIN documents d ON f.document_id=d.id WHERE f.entity_id=?",
-        (eid,),
-    ).fetchall()
     aliases = db.execute(
-        "SELECT alias FROM entity_aliases WHERE entity_id=?", (eid,)
+        f"SELECT alias FROM {table}_aliases WHERE {table}_id=?", (eid,),
+    ).fetchall()
+    claims = db.execute(
+        f"SELECT c.column_name, c.value, c.confidence, c.status, c.created_at, d.slug AS doc_slug "
+        f"FROM {table}_claims c JOIN documents d ON d.id=c.document_id "
+        f"WHERE c.{table}_id=? ORDER BY c.created_at DESC",
+        (eid,),
+    ).fetchall()
+    # incoming relations (junction tables)
+    relations = []
+    if table == "person":
+        relations = db.execute(
+            "SELECT e.id, o.canonical_name AS organization, e.role, e.start_date, e.end_date, "
+            "e.confidence, d.slug AS doc_slug "
+            "FROM employment e JOIN organization o ON o.id=e.organization_id "
+            "JOIN documents d ON d.id=e.document_id WHERE e.person_id=?",
+            (eid,),
+        ).fetchall()
+    elif table == "organization":
+        emp = db.execute(
+            "SELECT e.id, p.canonical_name AS person, e.role, e.start_date, e.end_date, "
+            "e.confidence FROM employment e JOIN person p ON p.id=e.person_id "
+            "WHERE e.organization_id=?", (eid,),
+        ).fetchall()
+        mfg = db.execute(
+            "SELECT m.id, p.canonical_name AS product, m.confidence "
+            "FROM manufacturing m JOIN product p ON p.id=m.product_id "
+            "WHERE m.organization_id=?", (eid,),
+        ).fetchall()
+        relations = [dict(r) | {"kind": "employment"} for r in emp] + [
+            dict(r) | {"kind": "manufacturing"} for r in mfg
+        ]
+    elif table == "product":
+        relations = db.execute(
+            "SELECT m.id, o.canonical_name AS organization, m.confidence "
+            "FROM manufacturing m JOIN organization o ON o.id=m.organization_id "
+            "WHERE m.product_id=?", (eid,),
+        ).fetchall()
+    mentions = db.execute(
+        "SELECT m.surface_form, d.slug AS doc_slug FROM entity_mentions m "
+        "JOIN documents d ON d.id=m.document_id "
+        "WHERE m.entity_table=? AND m.entity_id=?",
+        (table, eid),
     ).fetchall()
     return {
         "entity": dict(e),
-        "out": [dict(r) for r in rel],
-        "in": [dict(r) for r in inc],
-        "facts": [dict(r) for r in facts],
         "aliases": [r["alias"] for r in aliases],
+        "claims": [dict(r) for r in claims],
+        "relations": [dict(r) if not isinstance(r, dict) else r for r in relations],
+        "mentions": [dict(r) for r in mentions],
     }
 
 
-@app.get("/api/graph")
-def graph(focus: int = 0, limit: int = 250):
-    db = ro()
-    if focus:
-        rels = db.execute(
-            "SELECT subject_id s, object_id o, predicate p, status st FROM relations "
-            "WHERE subject_id=? OR object_id=? LIMIT ?",
-            (focus, focus, limit),
-        ).fetchall()
-    else:
-        rels = db.execute(
-            "SELECT subject_id s, object_id o, predicate p, status st "
-            "FROM relations LIMIT ?",
-            (limit,),
-        ).fetchall()
-    ids = {r["s"] for r in rels} | {r["o"] for r in rels} | ({focus} if focus else set())
-    nodes = []
-    if ids:
-        ph = ",".join("?" * len(ids))
-        for n in db.execute(
-            f"SELECT id, canonical_name, type FROM entities WHERE id IN ({ph})",
-            tuple(ids),
-        ):
-            nodes.append(
-                {"data": {"id": str(n["id"]), "label": n["canonical_name"], "type": n["type"]}}
-            )
-    edges = [
-        {
-            "data": {
-                "source": str(r["s"]),
-                "target": str(r["o"]),
-                "label": r["p"],
-                "conflict": r["st"] == "conflicted",
-            }
-        }
-        for r in rels
-    ]
-    return {"nodes": nodes, "edges": edges}
-
-
+# ---------- conflicts ----------
 @app.get("/api/conflicts")
 def conflicts():
     db = ro()
-    rel_groups, fact_groups = kg.open_conflicts(db)
-    out = {"relations": [], "facts": []}
-    for c in rel_groups:
-        members = db.execute(
-            "SELECT e1.canonical_name s, r.predicate p, e2.canonical_name o, d.slug src "
-            "FROM relations r JOIN entities e1 ON r.subject_id=e1.id "
-            "JOIN entities e2 ON r.object_id=e2.id JOIN documents d ON r.document_id=d.id "
-            "WHERE r.conflict_group=?",
-            (c["conflict_group"],),
-        ).fetchall()
-        out["relations"].append({"group": c["conflict_group"], "members": [dict(m) for m in members]})
-    for c in fact_groups:
-        members = db.execute(
-            "SELECT e.canonical_name n, f.attribute a, f.value v, d.slug src "
-            "FROM facts f JOIN entities e ON f.entity_id=e.id "
-            "JOIN documents d ON f.document_id=d.id WHERE f.conflict_group=?",
-            (c["conflict_group"],),
-        ).fetchall()
-        out["facts"].append({"group": c["conflict_group"], "members": [dict(m) for m in members]})
+    groups = kg.open_conflict_groups(db)
+    out = []
+    for g in groups:
+        # kind から claims 表を逆引き (e.g. person_birth_date → person_claims)
+        kind = g["kind"]
+        members: list[dict] = []
+        for table in kg.ENTITY_TABLES:
+            if kind.startswith(table + "_"):
+                column = kind.removeprefix(table + "_")
+                members = [
+                    dict(r) for r in db.execute(
+                        f"SELECT c.id, c.value, c.confidence, c.status, d.slug AS doc_slug "
+                        f"FROM {table}_claims c JOIN documents d ON d.id=c.document_id "
+                        f"WHERE c.conflict_group=?", (g["id"],),
+                    )
+                ]
+                break
+        for rel in kg.RELATION_CLAIM_COLUMNS:
+            if kind == f"{rel}_existence":
+                members = [
+                    dict(r) for r in db.execute(
+                        f"SELECT c.id, c.confidence, c.status, d.slug AS doc_slug "
+                        f"FROM {rel}_existence_claims c JOIN documents d ON d.id=c.document_id "
+                        f"WHERE c.conflict_group=?", (g["id"],),
+                    )
+                ]
+                break
+        out.append({"group": g["id"], "kind": kind, "created_at": g["created_at"], "members": members})
     return out
 
 
+# ---------- documents ----------
 @app.get("/api/documents")
 def documents():
     db = ro()
     return [
         dict(r)
         for r in db.execute(
-            "SELECT slug, title, ingested_at FROM documents ORDER BY ingested_at DESC"
+            "SELECT slug, title, ingested_at FROM documents WHERE id != 1 "
+            "ORDER BY ingested_at DESC",
         )
     ]
 
 
+# ---------- proposals review ----------
+@app.get("/api/proposals")
+def proposals(status: str = "pending"):
+    db = ro()
+    return [
+        dict(r) for r in db.execute(
+            "SELECT * FROM schema_proposals WHERE status=? ORDER BY created_at DESC",
+            (status,),
+        )
+    ]
+
+
+@app.get("/api/proposals/{pid}/validate")
+def proposal_validate(pid: int):
+    db = ro()
+    row = db.execute("SELECT * FROM schema_proposals WHERE id=?", (pid,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ast = pr.validate_ast(row["kind"], row["target_table"], row["proposed_ddl"])
+    dry = pr.dry_run(row["proposed_ddl"]) if ast.ok else None
+    return {
+        "ast_ok": ast.ok,
+        "ast_reason": ast.reason,
+        "dry_ok": dry.ok if dry else None,
+        "dry_reason": dry.reason if dry else None,
+        "diff": dry.diff if dry else None,
+    }
+
+
+@app.post("/api/proposals/{pid}/approve")
+def proposal_approve(pid: int, payload: dict = Body(default=None)):
+    db = rw()
+    row = db.execute("SELECT * FROM schema_proposals WHERE id=?", (pid,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if row["status"] != "pending":
+        return JSONResponse({"error": f"already {row['status']}"}, status_code=409)
+    ast = pr.validate_ast(row["kind"], row["target_table"], row["proposed_ddl"])
+    if not ast.ok:
+        db.execute(
+            "UPDATE schema_proposals SET status='rejected', decided_at=?, decided_by=?, "
+            "rationale=COALESCE(rationale,'') || ? WHERE id=?",
+            (pr._now(), (payload or {}).get("by", "system"),
+             f"\n[ast_validation_failed: {ast.reason}]", pid),
+        )
+        db.commit()
+        return JSONResponse({"error": "ast_validation_failed", "reason": ast.reason}, status_code=400)
+    dry = pr.dry_run(row["proposed_ddl"])
+    if not dry.ok:
+        db.execute(
+            "UPDATE schema_proposals SET status='rejected', decided_at=?, decided_by=?, "
+            "rationale=COALESCE(rationale,'') || ? WHERE id=?",
+            (pr._now(), (payload or {}).get("by", "system"),
+             f"\n[dry_run_failed: {dry.reason}]", pid),
+        )
+        db.commit()
+        return JSONResponse({"error": "dry_run_failed", "reason": dry.reason}, status_code=400)
+    name = f"proposal_{pid}_{row['kind']}_{row['target_table'] or 'na'}"
+    version = pr.apply(db, pid, row["proposed_ddl"], name)
+    return {"applied_migration": version, "diff": dry.diff}
+
+
+@app.post("/api/proposals/{pid}/reject")
+def proposal_reject(pid: int, payload: dict = Body(default=None)):
+    db = rw()
+    row = db.execute("SELECT status FROM schema_proposals WHERE id=?", (pid,)).fetchone()
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    db.execute(
+        "UPDATE schema_proposals SET status='rejected', decided_at=?, decided_by=? WHERE id=?",
+        (pr._now(), (payload or {}).get("by", "system"), pid),
+    )
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- staging review ----------
+@app.get("/api/staging")
+def staging(status: str = "pending"):
+    db = ro()
+    return [
+        dict(r) for r in db.execute(
+            "SELECT s.*, d.slug AS doc_slug FROM staging_extractions s "
+            "JOIN documents d ON d.id=s.document_id "
+            "WHERE s.status=? ORDER BY s.created_at DESC",
+            (status,),
+        )
+    ]
+
+
+@app.post("/api/staging/{sid}/decide")
+def staging_decide(sid: int, payload: dict = Body(default=None)):
+    decided_table = (payload or {}).get("decided_table")
+    db = rw()
+    db.execute(
+        "UPDATE staging_extractions SET status='assigned', decided_table=?, decided_at=? "
+        "WHERE id=?",
+        (decided_table, pr._now(), sid),
+    )
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/staging/{sid}/reject")
+def staging_reject(sid: int):
+    db = rw()
+    db.execute(
+        "UPDATE staging_extractions SET status='rejected', decided_at=? WHERE id=?",
+        (pr._now(), sid),
+    )
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- weak_relations triage ----------
+@app.get("/api/weak_relations")
+def weak_relations(predicate: str = ""):
+    db = ro()
+    if predicate:
+        rows = db.execute(
+            "SELECT * FROM weak_relations WHERE promoted_to IS NULL AND predicate=? "
+            "ORDER BY created_at DESC", (predicate,),
+        )
+    else:
+        rows = db.execute(
+            "SELECT predicate, COUNT(*) n FROM weak_relations WHERE promoted_to IS NULL "
+            "GROUP BY predicate ORDER BY n DESC",
+        )
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/weak_relations/promote")
+def weak_promote(payload: dict = Body(...)):
+    """同一 predicate を schema_proposal (new_table) に昇格させる。"""
+    predicate = payload.get("predicate")
+    if not predicate:
+        return JSONResponse({"error": "predicate required"}, status_code=400)
+    db = rw()
+    kg.add_schema_proposal(
+        db,
+        kind="new_table",
+        target_table=predicate,
+        proposed_ddl=(
+            f"CREATE TABLE {predicate} (\n"
+            "  id INTEGER PRIMARY KEY,\n"
+            "  -- TODO: subject/object FK と属性列を追加\n"
+            "  created_at TEXT NOT NULL\n"
+            ");"
+        ),
+        rationale=f"manual promotion from weak_relations: {predicate}",
+        requires_manual_dry_run=True,
+    )
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- eval (旧実装を流用) ----------
 def _summarize_per_case(stage: str, per_case: list) -> tuple[int, bool]:
-    """per_case の件数と「失敗を含むか」を返す。stage 別に判定基準を切替。"""
     if not per_case:
         return 0, False
     if stage == "query":
@@ -190,32 +347,18 @@ def _summarize_per_case(stage: str, per_case: list) -> tuple[int, bool]:
             for c in per_case
         )
     else:
-        # extract / dedup の per_case は失敗ケースのみ格納される設計
         has_fail = True
     return len(per_case), has_fail
 
 
 def _headline(stage: str, agg: dict) -> tuple[dict, float | None]:
-    """run 一覧で表示する代表値と、0〜1 のスコア（色グラデ用）を返す。"""
     g = lambda k: agg.get(k + "_mean")  # noqa: E731
     if stage == "query":
-        vals = {
-            "sql": g("sql_success_rate"),
-            "row": g("row_contains_rate"),
-            "doc": g("doc_slug_rate"),
-        }
+        vals = {"sql": g("sql_success_rate"), "row": g("row_contains_rate"), "doc": g("doc_slug_rate")}
     elif stage == "extract":
-        vals = {
-            "ent_f1": g("entities_f1"),
-            "rel_f1": g("relations_f1"),
-            "fact_f1": g("facts_f1"),
-        }
+        vals = {"ent_f1": g("entities_f1"), "rel_f1": g("relations_f1"), "fact_f1": g("facts_f1")}
     elif stage == "dedup":
-        vals = {
-            "acc": g("accuracy"),
-            "f1": g("f1"),
-            "lvl": g("level_match_rate"),
-        }
+        vals = {"acc": g("accuracy"), "f1": g("f1"), "lvl": g("level_match_rate")}
     else:
         vals = {k[:-5]: v for k, v in agg.items() if k.endswith("_mean")}
     nums = [v for v in vals.values() if isinstance(v, (int, float))]
@@ -225,7 +368,6 @@ def _headline(stage: str, agg: dict) -> tuple[dict, float | None]:
 
 @app.get("/api/eval/runs")
 def eval_runs():
-    """eval run の一覧。per_case は含めず軽量サマリのみ返す。"""
     if not EVAL_RUNS_DIR.is_dir():
         return []
     items = []
@@ -240,18 +382,13 @@ def eval_runs():
             agg = result.get("aggregate") or {}
             headline, score = _headline(stage, agg)
             items.append({
-                "filename": p.name,
-                "meta": meta,
-                "aggregate": agg,
+                "filename": p.name, "meta": meta, "aggregate": agg,
                 "gold_summary": result.get("gold_summary") or {},
-                "per_case_count": n_case,
-                "has_failures": has_fail,
-                "headline": headline,
-                "score": score,
+                "per_case_count": n_case, "has_failures": has_fail,
+                "headline": headline, "score": score,
             })
         except (OSError, json.JSONDecodeError, ValueError) as e:
             items.append({"filename": p.name, "error": str(e)})
-    # 新しい順（timestamp_utc 降順）。error 行は末尾に。
     items.sort(
         key=lambda x: (x.get("meta", {}).get("timestamp_utc") or "", x["filename"]),
         reverse=True,
@@ -261,13 +398,12 @@ def eval_runs():
 
 @app.get("/api/eval/run/{filename}")
 def eval_run(filename: str):
-    """1 run の生 JSON を返す。パストラバーサル防止のため厳格に検証。"""
     if not filename.endswith(".json") or Path(filename).name != filename:
         return JSONResponse({"error": "invalid filename"}, status_code=400)
     target = (EVAL_RUNS_DIR / filename).resolve()
     try:
         inside = target.is_relative_to(EVAL_RUNS_DIR.resolve())
-    except AttributeError:  # Py < 3.9 fallback
+    except AttributeError:
         inside = str(target).startswith(str(EVAL_RUNS_DIR.resolve()))
     if not inside or not target.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -277,6 +413,7 @@ def eval_run(filename: str):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ---------- ask (typed schema 経由) ----------
 @app.post("/api/ask")
 def ask(payload: dict = Body(...)):
     question = (payload or {}).get("question", "").strip()
@@ -292,7 +429,7 @@ def index():
 
 def main():
     if not config.KG_DB.exists():
-        kg.connect().commit()  # 空 DB を作っておく
+        kg.connect().commit()
     try:
         app.mount("/static", StaticFiles(directory=config.WEB_DIR), name="static")
     except Exception:  # noqa: BLE001

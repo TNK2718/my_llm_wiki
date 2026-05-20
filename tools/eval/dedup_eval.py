@@ -1,7 +1,8 @@
-"""Stage 2: Entity Dedup evaluator。
+"""Stage 2: Entity Dedup evaluator (typed-schema)。
 
-ペア毎にテンポラリ SQLite ファイルを作って独立性を担保。本番 DB には触れない
-（fixtures.redirect_kg_db / assert_not_prod を通す）。
+各ペアを独立した temp DB で評価。本番 DB には触れない。
+typed pipeline では adjudicate (LLM) ステップは存在しないので、突合経路は
+exact (norm_key 一致) / alias (alias 表一致) / new (突合不能) の 3 種のみ。
 """
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ from pathlib import Path
 
 import config
 import db as kg
-import ingest
 import llm
 
 from tools.eval import fixtures
@@ -20,52 +20,57 @@ VALID_LEVELS = {"exact", "alias", "alias-or-llm", "llm-merge"}
 
 
 def _level_satisfied(expected_level: str | None, actual_how: str) -> bool:
-    """期待 level と実際の how の整合判定。
-    - exact:        actual は 'exact' のみ
-    - alias-or-llm: actual は 'alias' / 'llm-merge' のどちらでも OK
-    - llm-merge:    actual は 'llm-merge' のみ
-    - 未指定:       same と判定されさえすれば OK
+    """typed pipeline は LLM 突合経路を持たないので、'alias-or-llm' と 'llm-merge'
+    は実質 'new' で失敗扱いになる。期待 level vs 実際 how の整合:
     """
     if not expected_level:
         return actual_how != "new"
     if expected_level == "exact":
         return actual_how == "exact"
-    if expected_level == "alias-or-llm":
-        return actual_how in ("alias", "llm-merge")
-    if expected_level == "llm-merge":
-        return actual_how == "llm-merge"
     if expected_level == "alias":
         return actual_how == "alias"
+    if expected_level == "alias-or-llm":
+        return actual_how in ("alias",)  # typed には llm 経路なし
+    if expected_level == "llm-merge":
+        return False  # typed では実現不能
     return False
 
 
-def _eval_pair(pair: dict, adjudicate) -> dict:
-    """1 ペアを独立した temp DB で評価。adjudicate=None なら SLM 無効。"""
-    # ペア毎に新しい DB を作って redirect。前ペアの状態を持ち越さない。
+def _bootstrap_doc(db) -> int:
+    return kg.upsert_document(db, "dedup_eval", "dedup eval doc", None, "")
+
+
+def _eval_pair(pair: dict) -> dict:
+    """1 ペアを独立した temp DB で評価。"""
     target = fixtures.fresh_runtime_db("dedup")
     fixtures.redirect_kg_db(target)
     db = kg.connect()
     try:
         a, b = pair["a"], pair["b"]
-        etype = pair.get("type", "concept")
+        table = pair.get("table") or pair.get("type") or "person"
+        if table not in kg.ENTITY_TABLES:
+            # 旧 gold (type=org/concept) の保険
+            table = {"org": "organization"}.get(table, "person")
         with llm.trace_session() as trace:
-            llm.note("pair", a=a, b=b, type=etype)
-            eid_a, how_a = kg.find_or_stage_entity(db, a, etype, adjudicate=adjudicate)
-            llm.note("stage.a", entity_id=eid_a, how=how_a)
-            eid_b, how_b = kg.find_or_stage_entity(db, b, etype, adjudicate=adjudicate)
-            llm.note("stage.b", entity_id=eid_b, how=how_b)
+            with kg.writer(db):
+                _bootstrap_doc(db)
+                llm.note("pair", a=a, b=b, table=table)
+                eid_a, how_a = kg.upsert_entity(db, table, a)
+                llm.note("stage.a", entity_id=eid_a, how=how_a)
+                # b は a と同じ entity に着地するべきか? alias 経路を通すために
+                # 後ろから明示的に追加するのではなく、単に upsert_entity を再呼びすると
+                # 同じ norm_key で見つかれば 'exact', alias 表に b が登録済なら 'alias'。
+                # b が独立 norm_key を持てば 'new'。
+                eid_b, how_b = kg.upsert_entity(db, table, b)
+                llm.note("stage.b", entity_id=eid_b, how=how_b)
         predicted = "same" if eid_a == eid_b else "different"
         expected = pair["expected"]
         expected_level = pair.get("level")
         return {
-            "a": a,
-            "b": b,
-            "type": etype,
-            "expected": expected,
-            "predicted": predicted,
+            "a": a, "b": b, "table": table,
+            "expected": expected, "predicted": predicted,
             "correct": expected == predicted,
-            "how_a": how_a,
-            "how_b": how_b,
+            "how_a": how_a, "how_b": how_b,
             "expected_level": expected_level,
             "level_match": _level_satisfied(expected_level, how_b) if expected == "same" else None,
             "trace": trace,
@@ -78,37 +83,30 @@ def _eval_pair(pair: dict, adjudicate) -> dict:
             pass
 
 
-def evaluate(gold_path: Path, runs: int, adjudicate_enabled: bool) -> dict:
+def evaluate(gold_path: Path, runs: int, adjudicate_enabled: bool = False) -> dict:
+    """adjudicate_enabled は API 互換のため残すが、typed pipeline では無視される."""
     gold = eio.load_yaml(gold_path)
     pairs = gold.get("pairs") or []
 
-    # level の妥当性検証（spec 違反を早期に弾く）
     for p in pairs:
         lv = p.get("level")
         if lv is not None and lv not in VALID_LEVELS:
             raise ValueError(f"unknown level={lv!r} in pair {p}")
 
-    adjudicate = ingest.make_adjudicator() if adjudicate_enabled else None
-
     per_run: list[dict] = []
     last_per_case: list[dict] = []
     for i in range(runs):
-        results = [_eval_pair(p, adjudicate) for p in pairs]
+        results = [_eval_pair(p) for p in pairs]
 
         tp = sum(1 for r in results if r["expected"] == "same" and r["predicted"] == "same")
         fn = sum(1 for r in results if r["expected"] == "same" and r["predicted"] == "different")
         fp = sum(1 for r in results if r["expected"] == "different" and r["predicted"] == "same")
         tn = sum(1 for r in results if r["expected"] == "different" and r["predicted"] == "different")
-
-        same_total = tp + fn
-        diff_total = tn + fp
-        n = same_total + diff_total
-
+        n = tp + fn + tn + fp
         precision = tp / (tp + fp) if (tp + fp) else 0.0
         recall = tp / (tp + fn) if (tp + fn) else 0.0
         f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
         accuracy = (tp + tn) / n if n else 0.0
-
         same_cases = [r for r in results if r["expected"] == "same"]
         level_match_n = sum(1 for r in same_cases if r.get("level_match") is True)
         level_match_rate = (level_match_n / len(same_cases)) if same_cases else 0.0
@@ -118,8 +116,7 @@ def evaluate(gold_path: Path, runs: int, adjudicate_enabled: bool) -> dict:
             how_counter[r["how_b"]] = how_counter.get(r["how_b"], 0) + 1
 
         per_run.append({
-            "run": i + 1,
-            "n_pairs": n,
+            "run": i + 1, "n_pairs": n,
             "tp": tp, "fp": fp, "tn": tn, "fn": fn,
             "accuracy": round(accuracy, 4),
             "precision": round(precision, 4),
@@ -144,7 +141,7 @@ def evaluate(gold_path: Path, runs: int, adjudicate_enabled: bool) -> dict:
             "n_pairs": len(pairs),
             "n_same": sum(1 for p in pairs if p["expected"] == "same"),
             "n_different": sum(1 for p in pairs if p["expected"] == "different"),
-            "adjudicate_enabled": adjudicate_enabled,
+            "adjudicate_enabled": False,  # typed pipeline では常に false
         },
         "per_run": per_run,
         "aggregate": agg,
@@ -168,6 +165,6 @@ def summary_text(result: dict) -> str:
     gs = result["gold_summary"]
     how = result["per_run"][-1]["how_counts"] if result["per_run"] else {}
     return (
-        f"gold: pairs={gs['n_pairs']} (same={gs['n_same']}, different={gs['n_different']}), "
-        f"adjudicate={gs['adjudicate_enabled']}; last-run how_b counts: {how}"
+        f"gold: pairs={gs['n_pairs']} (same={gs['n_same']}, different={gs['n_different']}); "
+        f"last-run how_b counts: {how}"
     )

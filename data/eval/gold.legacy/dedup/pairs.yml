@@ -1,0 +1,30 @@
+# Entity dedup evaluator のゴールド。
+# 各ペアについて、決定的正規化（exact / alias）または SLM 判定（llm-merge）で
+# どの経路で同一とみなされるべきかを期待値として保持する。
+#
+# level の意味:
+#   exact          : tools/db.py:normalize() で norm_key が一致する → adjudicate 不要
+#   alias-or-llm   : norm_key は一致しないが類似度高い → adjudicate (SLM) で same と判定されるべき
+#   ※ different のときは level 不要
+schema_version: 1
+
+pairs:
+  # === same / exact (正規化のみで一致) ===
+  - {a: "アクメ株式会社",  b: "アクメ（株）",   type: org,     expected: same, level: exact}
+  - {a: "アクメ株式会社",  b: "アクメ",         type: org,     expected: same, level: exact}
+  # cross-language: norm_key も sim も 0 → 現行パイプラインでは merge できない既知限界
+  - {a: "アクメ株式会社",  b: "Acme Inc.",      type: org,     expected: same, level: alias-or-llm}
+  - {a: "山田 太郎",       b: "山田太郎",       type: person,  expected: same, level: exact}
+  - {a: "鈴木 花子",       b: "鈴木花子",       type: person,  expected: same, level: exact}
+  - {a: "SmartScan",       b: "Smart Scan",     type: product, expected: same, level: exact}
+  - {a: "SmartScan",       b: "smartscan",      type: product, expected: same, level: exact}
+
+  # === same / alias-or-llm (SLM 判定が必要) ===
+  - {a: "グローバルテック社",   b: "Global Tech",       type: org,     expected: same, level: alias-or-llm}
+
+  # === different ===
+  - {a: "山田 太郎",            b: "山田 花子",         type: person,  expected: different}
+  - {a: "アクメ株式会社",       b: "ベータ製造株式会社", type: org,     expected: different}
+  - {a: "グローバルテック社",   b: "ベータ製造株式会社", type: org,     expected: different}
+  - {a: "IBM Bob Pro",          b: "IBM Bob Pro Plus",  type: product, expected: different}
+  - {a: "SmartScan",            b: "SmartView",         type: product, expected: different}

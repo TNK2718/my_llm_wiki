@@ -70,114 +70,116 @@ def redirect_kg_db(target: Path) -> Path:
     return config.KG_DB
 
 
-# ---------- fixture build（query 評価用 snapshot DB） ----------
+# ---------- fixture build (typed-schema snapshot DB) ----------
 def build_fixture(extract_gold_path: Path | str, out_sqlite: Path | str) -> Path:
-    """extract gold YAML を読んで、決定的にスナップショット DB を構築する。
+    """extract gold YAML (schema_version >= 2) を読んで typed snapshot DB を構築する。
 
-    LLM は経由せず、gold の entities/relations/facts を直接 INSERT。
-    query 評価がモデル出力に依存しない再現性を持つ。
+    gold の entities/relations を typed API (upsert_<type> / find_or_create_<junction> /
+    record_claim / record_existence_claim) で投入し、決定的に同じ DB を作る。
     """
-    import sqlite3
-    from datetime import date
-
-    from tools.eval import io as eio
-
-    # 出力先を安全配下に強制
     out = Path(out_sqlite).resolve()
     assert_not_prod(out)
     assert_under_allowed(out)
     if out.exists():
         out.unlink()
 
+    from tools.eval import io as eio
     gold = eio.load_yaml(extract_gold_path)
     slug = gold["doc_slug"]
     source_rel = gold["source"]
 
-    # connect は config.KG_DB を見るので一時的に out へ向ける
     redirect_kg_db(out)
-    import db as kg  # 遅延 import: redirect 後に確実に新規 DB を作る
+    import db as kg
+    body = (config.ROOT / source_rel).read_text(encoding="utf-8", errors="replace") \
+        if (config.ROOT / source_rel).exists() else ""
 
-    conn = sqlite3.connect(out)
-    conn.executescript(config.SCHEMA_SQL.read_text(encoding="utf-8"))
-    conn.row_factory = sqlite3.Row
-    today = date.today().isoformat()
-    body = (config.ROOT / source_rel).read_text(encoding="utf-8", errors="replace") if (config.ROOT / source_rel).exists() else ""
-
-    # document
-    conn.execute(
-        "INSERT INTO documents(slug,title,path,ingested_at) VALUES(?,?,?,?)",
-        (slug, slug.replace("-", " "), source_rel, today),
-    )
-    conn.execute("INSERT INTO doc_fts(slug,title,body) VALUES(?,?,?)", (slug, slug, body))
-    doc_id = conn.execute("SELECT id FROM documents WHERE slug=?", (slug,)).fetchone()["id"]
-
-    # entities + aliases
-    name_to_id: dict[str, int] = {}
-    for e in gold.get("entities") or []:
-        nm = e["name"]
-        et = e.get("type") or "concept"
-        nk = kg.normalize(nm)
-        try:
-            cur = conn.execute(
-                "INSERT INTO entities(canonical_name,type,norm_key,attributes,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?)",
-                (nm, et, nk, "{}", today, today),
-            )
-            eid = cur.lastrowid
-        except sqlite3.IntegrityError:
-            eid = conn.execute(
-                "SELECT id FROM entities WHERE type=? AND norm_key=?", (et, nk)
-            ).fetchone()["id"]
-        name_to_id[nm] = eid
-        conn.execute(
-            "INSERT OR IGNORE INTO entity_aliases(entity_id,alias,norm_key) VALUES(?,?,?)",
-            (eid, nm, nk),
-        )
-        for a in e.get("aliases") or []:
-            conn.execute(
-                "INSERT OR IGNORE INTO entity_aliases(entity_id,alias,norm_key) VALUES(?,?,?)",
-                (eid, a, kg.normalize(a)),
-            )
-
-    def _resolve_name(n: str) -> int:
-        if n in name_to_id:
-            return name_to_id[n]
-        # alias 経由で引く（gold relations が alias 表記でも繋ぐため）
-        row = conn.execute(
-            "SELECT entity_id FROM entity_aliases WHERE norm_key=?", (kg.normalize(n),)
-        ).fetchone()
-        if row:
-            return row["entity_id"]
-        # 解決不能 → concept として新規作成
-        cur = conn.execute(
-            "INSERT INTO entities(canonical_name,type,norm_key,attributes,created_at,updated_at)"
-            " VALUES(?,?,?,?,?,?)",
-            (n, "concept", kg.normalize(n), "{}", today, today),
-        )
-        name_to_id[n] = cur.lastrowid
-        return cur.lastrowid
-
-    # relations
-    for r in gold.get("relations") or []:
-        s, p, o = r.get("subject"), r.get("predicate"), r.get("object")
-        if not (s and p and o):
-            continue
-        conn.execute(
-            "INSERT INTO relations(subject_id,predicate,object_id,document_id,evidence,confidence,created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (_resolve_name(s), p, _resolve_name(o), doc_id, r.get("evidence", ""), 0.9, today),
-        )
-
-    # facts
-    for f in gold.get("facts") or []:
-        e, a, v = f.get("entity"), f.get("attribute"), f.get("value")
-        if not (e and a):
-            continue
-        conn.execute(
-            "INSERT INTO facts(entity_id,attribute,value,document_id,created_at) VALUES(?,?,?,?,?)",
-            (_resolve_name(e), a, v, doc_id, today),
-        )
-
-    conn.commit()
-    conn.close()
+    conn = kg.connect()
+    try:
+        with kg.writer(conn):
+            doc_id = kg.upsert_document(conn, slug, slug.replace("-", " "), source_rel, body)
+            # entities
+            name_to_table_id: dict[str, tuple[str, int]] = {}
+            for e in gold.get("entities") or []:
+                table = e.get("proposed_type") or "person"
+                if table not in kg.ENTITY_TABLES:
+                    continue
+                nm = e["canonical_name"]
+                eid, _ = kg.upsert_entity(conn, table, nm)
+                for a in e.get("aliases") or []:
+                    kg.add_alias(conn, table, eid, a)
+                    name_to_table_id[a] = (table, eid)
+                name_to_table_id[nm] = (table, eid)
+                # attributes → record_claim (gold は conf=0.9 で投入)
+                cols = kg.ENTITY_CLAIM_COLUMNS[table]
+                for col, val in (e.get("attributes") or {}).items():
+                    if val is None or col not in cols:
+                        continue
+                    kg.record_claim(
+                        conn, table, eid, col, val, doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+            # relations
+            for r in gold.get("relations") or []:
+                junction = r.get("proposed_junction")
+                if junction not in kg.RELATION_CLAIM_COLUMNS:
+                    continue
+                f_name = r.get("from")
+                t_name = r.get("to")
+                src = name_to_table_id.get(f_name)
+                dst = name_to_table_id.get(t_name)
+                if src is None or dst is None:
+                    continue
+                attrs = r.get("attributes") or {}
+                if junction == "employment":
+                    person_id = src[1] if src[0] == "person" else dst[1]
+                    org_id = dst[1] if dst[0] == "organization" else src[1]
+                    eid, _ = kg.find_or_create_employment(
+                        conn, person_id, org_id, attrs.get("start_date"), doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "employment", eid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+                    for col in ("role", "end_date"):
+                        if col in attrs and attrs[col]:
+                            kg.record_relation_claim(
+                                conn, "employment", eid, col, attrs[col], doc_id,
+                                evidence=f"gold:{slug}", confidence=0.9,
+                            )
+                elif junction == "manufacturing":
+                    prod_id = src[1] if src[0] == "product" else dst[1]
+                    org_id = dst[1] if dst[0] == "organization" else src[1]
+                    mid, _, _ = kg.find_or_create_manufacturing(
+                        conn, prod_id, org_id, doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "manufacturing", mid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+                elif junction == "org_hierarchy":
+                    parent_id = src[1]
+                    child_id = dst[1]
+                    oid, _, _ = kg.find_or_create_org_hierarchy(
+                        conn, parent_id, child_id, doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "org_hierarchy", oid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+            # weak_relations
+            for w in gold.get("weak_relations") or []:
+                subj = name_to_table_id.get(w.get("subject"))
+                if subj is None:
+                    continue
+                obj = name_to_table_id.get(w.get("object"))
+                kg.add_weak_relation(
+                    conn,
+                    subject_table=subj[0], subject_id=subj[1],
+                    predicate=w["predicate"],
+                    object_table=obj[0] if obj else None,
+                    object_id=obj[1] if obj else None,
+                    object_text=None if obj else w.get("object"),
+                    document_id=doc_id,
+                    evidence=f"gold:{slug}",
+                    confidence=0.3,
+                )
+    finally:
+        conn.close()
     return out

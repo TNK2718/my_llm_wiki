@@ -32,10 +32,23 @@ STRIP_TOKENS = [
     "inc", "inc.", "corp", "corp.", "corporation", "co.", "co", "ltd",
     "ltd.", "llc", "k.k.", "kk",
 ]
-# 値が1つに定まるべき述語（複数値が来たら矛盾候補にする）
-FUNCTIONAL_PREDICATES = {"CEO", "代表者", "本社所在地", "設立年", "親会社"}
 # 突合候補とみなすトリグラム類似のしきい値（0-1, 高いほど厳格）
 DEDUP_SIM_THRESHOLD = 0.55
+
+# --- typed-schema claims 状態遷移 (docs/typed-schema-design.md §3, §5, §7) ---
+# 新 claim が既存最高 active より δ 以上高ければ canonical を UPDATE、δ 以内なら conflict
+CLAIM_CONFIDENCE_DELTA = 0.1
+# conf < この値の claim は staging / weak_relations に振り分ける
+LOW_CONFIDENCE_THRESHOLD = 0.3
+# LLM 抽出 conf の上限。人手 verdict (1.0) が doc 主張に silent 降格されないよう cap
+LLM_CONFIDENCE_CAP = 0.95
+# bootstrap で seed する __human__ document の id
+HUMAN_DOCUMENT_ID = 1
+# 同一 predicate が weak_relations に N 件超 蓄積したら schema_proposal を自動起票
+WEAK_RELATION_PROMOTION_N = 5
+
+# --- migrations ---
+MIGRATIONS_DIR = ROOT / "tools" / "migrations"
 
 # --- text2sql 修復ヒント（失敗時のみ参照） ---
 EMBED_URL = "http://localhost:11434/api/embeddings"

@@ -13,9 +13,14 @@ from tools.eval import matchers
 from tools.eval.metrics import PRF, aggregate
 
 
-def _run_once(body: str) -> tuple[list, list, list]:
+def _run_once(body: str):
+    """typed extract: returns GraphExtraction with entities/relations/weak_relations."""
     chunks = ingest.semantic_chunk(body, config.CHUNK_CHARS)
-    return ingest.extract_graph_from_chunks(chunks)
+    g = ingest.extract_graph_from_chunks(chunks)
+    ents = [e.model_dump(by_alias=True) for e in g.entities]
+    rels = [r.model_dump(by_alias=True) for r in g.relations]
+    weak = [w.model_dump() for w in g.weak_relations]
+    return ents, rels, weak
 
 
 def evaluate(gold_path: Path, runs: int) -> dict:
@@ -25,16 +30,16 @@ def evaluate(gold_path: Path, runs: int) -> dict:
 
     g_ent = gold.get("entities") or []
     g_rel = gold.get("relations") or []
-    g_fact = gold.get("facts") or []
+    g_fact = gold.get("entities") or []  # attribute claims live inside entities now
 
     per_run: list[dict] = []
     last_per_case: list[dict] = []
     for i in range(runs):
         with llm.trace_session() as trace:
-            ents, rels, facts = _run_once(body)
+            ents, rels, _weak = _run_once(body)
         m_e = matchers.match_entities(g_ent, ents)
         m_r = matchers.match_relations(g_rel, rels)
-        m_f = matchers.match_facts(g_fact, facts)
+        m_f = matchers.match_facts(g_fact, ents)
 
         prf_e = PRF(m_e["tp"], m_e["fp"], m_e["fn"]).as_dict()
         prf_r = PRF(m_r["tp"], m_r["fp"], m_r["fn"]).as_dict()
@@ -74,7 +79,7 @@ def evaluate(gold_path: Path, runs: int) -> dict:
             "doc_slug": gold.get("doc_slug"),
             "n_entities": len(g_ent),
             "n_relations": len(g_rel),
-            "n_facts": len(g_fact),
+            "n_attribute_claims": sum(len((e.get("attributes") or {})) for e in g_fact),
         },
         "per_run": per_run,
         "aggregate": agg,

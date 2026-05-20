@@ -1,42 +1,48 @@
-"""取り込みパイプライン（グラフ版）。スクリプトが制御し、SLM は狭いタスクのみ。
+"""Typed-schema ingest パイプライン。docs/typed-schema-design.md「Ingest フロー」準拠。
 
   python tools/ingest.py raw/extracted/議事録.md
 
 手順:
-  1. semantic chunking（markdown header / 段落境界を尊重）
-  2. グラフ抽出: entities/relations/facts を JSON で（SLM, per-chunk + running entity hint）
-  3. 突合: ルール正規化 → 曖昧時のみ SLM 判定 → DB へ（決定的中心）
-  4. 関数的述語・属性の矛盾をルール検出（非破壊で conflict_group 化）
-  5. log 追記 → 人間用レビュー要約（矛盾・新規実体を提示）
+  1. semantic chunking (markdown header / 段落境界を尊重)
+  2. typed extract (entities/relations/weak_relations) — SLM, per-chunk + running entity hint
+  3. resolve_or_stage: 決定論的類似度（norm_key + similarity）で既存マッチ判定
+     - starter 型 + 高 conf  → upsert + record_claim (§3 状態遷移)
+     - 未知型 / new_table_proposal → staging_extractions + schema_proposal
+     - 低 conf attribute       → staging_extractions
+  4. resolve_relation:
+     - starter junction + 高 conf → find_or_create_<junction> + record_existence_claim
+     - cardinality 違反         → staging_extractions
+     - 未知 junction / 低 conf → weak_relations
+     - N≥5 同 predicate         → schema_proposal 自動起票
+  5. log 追記
 """
+from __future__ import annotations
+
+import json
 import re
 import sys
 import textwrap
+from typing import Iterable
 
 import config
-import llm
 import db as kg
+import llm
 import logadd
+from extract_schema import (
+    EntityExtraction,
+    GraphExtraction,
+    RelationExtraction,
+    WeakRelationExtraction,
+    parse_extraction,
+)
 
 
-_SCALAR_RE = re.compile(r"^(約|およそ)?[\d０-９]")
-
-
-def _looks_scalar_or_long(s: str) -> bool:
-    s = (s or "").strip()
-    return bool(s) and (bool(_SCALAR_RE.match(s)) or len(s) > 30)
-
-
-def load_prompt(name):
-    return (config.PROMPTS / name).read_text(encoding="utf-8")
-
-
+# ---------- chunking (旧実装を流用) ----------
 def _char_split(text: str, size: int) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)] or [""]
 
 
 def _split_by_header_level(text: str, level: int) -> list[str]:
-    """Markdown を指定レベル（例 ## なら 2）のヘッダ位置で切る。該当ヘッダが無ければ単一要素を返す。"""
     pat = re.compile(rf"(?m)^#{{{level}}}\s")
     starts = [m.start() for m in pat.finditer(text)]
     if not starts:
@@ -51,7 +57,6 @@ def _split_by_header_level(text: str, level: int) -> list[str]:
 
 
 def _split_recursive(text: str, max_chars: int, levels: list[int]) -> list[str]:
-    """levels の順にヘッダで切り、max_chars 超のセクションだけさらに深いレベルへ再帰。"""
     if len(text) <= max_chars or not levels:
         return [text]
     level = levels[0]
@@ -68,7 +73,6 @@ def _split_recursive(text: str, max_chars: int, levels: list[int]) -> list[str]:
 
 
 def _greedy_pack(units: list[str], max_chars: int, sep: str = "\n\n") -> list[str]:
-    """隣接 unit を max_chars を超えない範囲で結合。"""
     out, cur, cur_len = [], [], 0
     for u in units:
         ul = len(u)
@@ -87,17 +91,14 @@ def _greedy_pack(units: list[str], max_chars: int, sep: str = "\n\n") -> list[st
 
 
 def semantic_chunk(text: str, max_chars: int) -> list[str]:
-    """markdown header → 段落 → 文字数 の優先順で意味的に分割。"""
     if not text:
         return [""]
     if len(text) <= max_chars:
         return [text]
-
     if re.search(r"(?m)^#{1,6}\s", text):
         units = _split_recursive(text, max_chars, [2, 3, 4, 5, 6])
     else:
         units = [u for u in re.split(r"\n\s*\n", text) if u.strip()] or [text]
-
     expanded = []
     for u in units:
         if len(u) <= max_chars:
@@ -109,83 +110,402 @@ def semantic_chunk(text: str, max_chars: int) -> list[str]:
                 expanded.append(p)
             else:
                 expanded.extend(_char_split(p, max_chars))
-
     return _greedy_pack(expanded, max_chars)
+
+
+# ---------- extract ----------
+def load_prompt(name):
+    return (config.PROMPTS / name).read_text(encoding="utf-8")
 
 
 def _format_known_entities(known: list[dict]) -> str:
     if not known:
         return ""
-    block = "\n".join(f"- {e['name']} ({e.get('type', 'concept')})" for e in known)
+    block = "\n".join(
+        f"- {e['canonical_name']} ({e.get('proposed_type', '?')})" for e in known
+    )
     return (
         "このドキュメント内で既に登場したエンティティ"
-        "（同一対象を指す新しい言及があれば、これらの表記を再利用してください）:\n"
+        "（同一対象を指す新しい言及があれば、同じ canonical_name を再利用してください）:\n"
         f"{block}\n\n"
     )
 
 
-def extract_graph(text: str, known_entities: list[dict] | None = None):
+def extract_graph_from_chunks(chunks: list[str]) -> GraphExtraction:
     tmpl = load_prompt("extract_graph.txt")
-    prompt = tmpl.replace("{KNOWN_ENTITIES}", _format_known_entities(known_entities or [])).replace(
-        "{CONTENT}", text
-    )
-    g = llm.ask_json(prompt)
-    if isinstance(g, list):  # 弱いモデルが配列を返す保険
-        g = {"entities": g, "relations": [], "facts": []}
-    return (g.get("entities") or [], g.get("relations") or [], g.get("facts") or [])
-
-
-def _dedup_entities_by_name(ents: list[dict]) -> list[dict]:
-    """同一 name は最初に出たものを採用（type も最初のものを保持）。"""
-    seen, out = set(), []
-    for e in ents:
-        nm = e.get("name")
-        if not nm or nm in seen:
-            continue
-        seen.add(nm)
-        out.append(e)
-    return out
-
-
-def extract_graph_from_chunks(chunks: list[str]):
-    """単一 chunk なら full-text 1パス、複数なら per-chunk + running entity hint。"""
     if len(chunks) == 1:
-        return extract_graph(chunks[0])
+        prompt = tmpl.replace("{KNOWN_ENTITIES}", "").replace("{CONTENT}", chunks[0])
+        return parse_extraction(llm.ask_json(prompt))
 
-    ents, rels, facts = [], [], []
-    seen, seen_names = [], set()
+    merged = GraphExtraction()
+    seen_names: set[str] = set()
+    seen_summary: list[dict] = []
     for c in chunks:
-        e, r, f = extract_graph(c, known_entities=seen)
-        for ent in e:
-            nm = ent.get("name")
-            if nm and nm not in seen_names:
-                seen.append(ent)
-                seen_names.add(nm)
-        ents.extend(e)
-        rels.extend(r)
-        facts.extend(f)
-    return _dedup_entities_by_name(ents), rels, facts
+        prompt = tmpl.replace(
+            "{KNOWN_ENTITIES}", _format_known_entities(seen_summary)
+        ).replace("{CONTENT}", c)
+        part = parse_extraction(llm.ask_json(prompt))
+        for e in part.entities:
+            if e.canonical_name and e.canonical_name not in seen_names:
+                seen_summary.append({
+                    "canonical_name": e.canonical_name,
+                    "proposed_type": e.proposed_type,
+                })
+                seen_names.add(e.canonical_name)
+        merged.entities.extend(part.entities)
+        merged.relations.extend(part.relations)
+        merged.weak_relations.extend(part.weak_relations)
+    return merged
 
 
-def make_adjudicator():
-    tmpl = load_prompt("dedup_adjudicate.txt")
+# ---------- resolve ----------
+STARTER_ENTITY_TYPES = set(kg.ENTITY_TABLES)
+STARTER_JUNCTIONS = set(kg.RELATION_CLAIM_COLUMNS)
 
-    def adjudicate(a, b, etype):
-        out = (
-            llm.ask(tmpl.replace("{TYPE}", etype).replace("{NAME_A}", a).replace("{NAME_B}", b))
-            .strip()
-            .lower()
+
+def _resolve_entity(
+    db,
+    e: EntityExtraction,
+    doc_id: int,
+    counters: dict,
+) -> int | None:
+    """resolve_or_stage: 1 entity を typed table に流す。返り値: entity_id (流せた時) or None.
+
+    starter 型以外の主張は staging + schema_proposal に積み、entity_id は返さない。
+    """
+    if not e.canonical_name:
+        return None
+    if e.proposed_type not in STARTER_ENTITY_TYPES:
+        # 未知型 → staging + schema_proposal
+        kg.add_staging_extraction(
+            db, doc_id,
+            raw_payload=e.model_dump_json(),
+            proposed_table=e.proposed_type,
+            match_summary=json.dumps(
+                {"reason": "non_starter_type", "starter_types": list(STARTER_ENTITY_TYPES)},
+                ensure_ascii=False,
+            ),
         )
-        return "same" if out.startswith("same") else "different"
+        if e.new_table_proposal:
+            kg.add_schema_proposal(
+                db,
+                kind="new_table",
+                target_table=e.new_table_proposal.table,
+                proposed_ddl=_render_new_table_ddl(e.new_table_proposal),
+                rationale=e.new_table_proposal.rationale,
+                evidence_docs=json.dumps([doc_id]),
+            )
+        counters["staged_entity"] = counters.get("staged_entity", 0) + 1
+        return None
 
-    return adjudicate
+    table = e.proposed_type
+    eid, how = kg.upsert_entity(db, table, e.canonical_name)
+    if e.mention_surface and e.mention_surface != e.canonical_name:
+        kg.add_alias(db, table, eid, e.mention_surface)
+        kg.add_mention(db, doc_id, table, eid, e.mention_surface)
+    else:
+        kg.add_mention(db, doc_id, table, eid, e.canonical_name)
+    counters[f"entity_{how}"] = counters.get(f"entity_{how}", 0) + 1
+
+    # attributes → record_claim
+    columns = kg.ENTITY_CLAIM_COLUMNS[table]
+    for col_name, value in (e.attributes or {}).items():
+        if value is None or value == "":
+            continue
+        if col_name == "canonical_name":
+            # canonical_name は upsert で既に set 済み。重複 claim はスキップ。
+            continue
+        if col_name not in columns:
+            # 未知列 → staging + schema_proposal (new_column)
+            kg.add_staging_extraction(
+                db, doc_id,
+                raw_payload=json.dumps(
+                    {"entity_table": table, "entity_id": eid,
+                     "column_name": col_name, "value": value,
+                     "confidence": e.confidence}, ensure_ascii=False,
+                ),
+                proposed_table=table,
+                match_summary=json.dumps(
+                    {"reason": "unknown_column", "known_columns": list(columns)},
+                    ensure_ascii=False,
+                ),
+            )
+            kg.add_schema_proposal(
+                db,
+                kind="new_column",
+                target_table=table,
+                proposed_ddl=f"ALTER TABLE {table} ADD COLUMN {col_name} TEXT;",
+                rationale=f"resolve_or_stage: unknown column {col_name!r} on {table}",
+                evidence_docs=json.dumps([doc_id]),
+            )
+            counters["staged_attribute"] = counters.get("staged_attribute", 0) + 1
+            continue
+        r = kg.record_claim(
+            db, table, eid, col_name, value, doc_id,
+            evidence=e.evidence, confidence=e.confidence,
+        )
+        if r.result == kg.RecordClaimResult.REJECTED_LOW_CONFIDENCE:
+            kg.add_staging_extraction(
+                db, doc_id,
+                raw_payload=json.dumps(
+                    {"kind": "attribute_claim", "entity_table": table,
+                     "entity_id": eid, "column_name": col_name, "value": value,
+                     "confidence": e.confidence}, ensure_ascii=False,
+                ),
+                proposed_table=table,
+                match_summary=json.dumps({"reason": "low_confidence"}, ensure_ascii=False),
+            )
+            counters["staged_lowconf_attr"] = counters.get("staged_lowconf_attr", 0) + 1
+        else:
+            counters[f"claim_{r.result.value}"] = counters.get(f"claim_{r.result.value}", 0) + 1
+    return eid
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("usage: python tools/ingest.py raw/extracted/<file>.md")
+_JUNCTION_FROM_TYPE = {
+    "employment": ("person", "organization"),
+    "manufacturing": ("product", "organization"),
+    "org_hierarchy": ("organization", "organization"),
+}
+
+
+def _find_resolved(name_to_id: dict, table_hint: str, name: str) -> tuple[str, int] | None:
+    """name_to_id は (table, name) → id だが、proposed_junction の from/to は型不明で来る。
+    table_hint を優先し見つからなければ全 starter table を順に試す。"""
+    if not name:
+        return None
+    for tbl in (table_hint,) + tuple(t for t in kg.ENTITY_TABLES if t != table_hint):
+        eid = name_to_id.get((tbl, name))
+        if eid is not None:
+            return tbl, eid
+    return None
+
+
+def _resolve_relation(
+    db,
+    r: RelationExtraction,
+    doc_id: int,
+    name_to_id: dict,
+    counters: dict,
+) -> None:
+    """starter junction or weak_relations / staging に振り分け。"""
+    junction = r.proposed_junction
+    if junction not in STARTER_JUNCTIONS:
+        # 未知 junction → weak_relations 経由で受ける
+        kg.add_weak_relation(
+            db,
+            subject_table="organization",  # plausible default; weak は object_text で扱う
+            subject_id=0,
+            predicate=junction,
+            document_id=doc_id,
+            object_text=f"{r.from_} -> {r.to}",
+            evidence=r.evidence,
+            confidence=min(r.confidence, 0.3),
+        )
+        counters["weak_unknown_junction"] = counters.get("weak_unknown_junction", 0) + 1
         return
-    src = config.ROOT / sys.argv[1]
+
+    expected_from, expected_to = _JUNCTION_FROM_TYPE[junction]
+    src = _find_resolved(name_to_id, expected_from, r.from_)
+    dst = _find_resolved(name_to_id, expected_to, r.to)
+    if src is None or dst is None:
+        counters["rel_unresolved_endpoint"] = counters.get("rel_unresolved_endpoint", 0) + 1
+        return
+
+    if junction == "employment":
+        person_id = src[1] if src[0] == "person" else dst[1]
+        org_id = dst[1] if dst[0] == "organization" else src[1]
+        start_date = (r.attributes or {}).get("start_date")
+        eid, how = kg.find_or_create_employment(
+            db, person_id, org_id, start_date, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"employment_{how}"] = counters.get(f"employment_{how}", 0) + 1
+        ex = kg.record_existence_claim(
+            db, "employment", eid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        if ex.result == kg.RecordClaimResult.REJECTED_LOW_CONFIDENCE:
+            _route_weak(db, "person", person_id, "employment", "organization", org_id, doc_id, r)
+            return
+        for col in ("role", "end_date"):
+            val = (r.attributes or {}).get(col)
+            if val:
+                kg.record_relation_claim(
+                    db, "employment", eid, col, val, doc_id,
+                    evidence=r.evidence, confidence=r.confidence,
+                )
+
+    elif junction == "manufacturing":
+        prod_id = src[1] if src[0] == "product" else dst[1]
+        org_id = dst[1] if dst[0] == "organization" else src[1]
+        mid, how, conflict_with = kg.find_or_create_manufacturing(
+            db, prod_id, org_id, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"manufacturing_{how}"] = counters.get(f"manufacturing_{how}", 0) + 1
+        if how == "cardinality_violation":
+            kg.add_staging_extraction(
+                db, doc_id,
+                raw_payload=json.dumps(
+                    {"kind": "cardinality_violation",
+                     "junction": "manufacturing",
+                     "product_id": prod_id,
+                     "proposed_org_id": org_id,
+                     "existing_manufacturing_id": conflict_with,
+                     "confidence": r.confidence}, ensure_ascii=False,
+                ),
+                proposed_table="manufacturing",
+                match_summary=json.dumps(
+                    {"reason": "cardinality_violation",
+                     "rule": "UNIQUE(product_id)"}, ensure_ascii=False,
+                ),
+            )
+            return
+        kg.record_existence_claim(
+            db, "manufacturing", mid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+
+    elif junction == "org_hierarchy":
+        # from = parent, to = child
+        parent_id = src[1]
+        child_id = dst[1]
+        oid, how, conflict_with = kg.find_or_create_org_hierarchy(
+            db, parent_id, child_id, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"org_hierarchy_{how}"] = counters.get(f"org_hierarchy_{how}", 0) + 1
+        if how == "cardinality_violation":
+            kg.add_staging_extraction(
+                db, doc_id,
+                raw_payload=json.dumps(
+                    {"kind": "cardinality_violation",
+                     "junction": "org_hierarchy",
+                     "child_org_id": child_id,
+                     "proposed_parent_id": parent_id,
+                     "existing_org_hierarchy_id": conflict_with}, ensure_ascii=False,
+                ),
+                proposed_table="org_hierarchy",
+                match_summary=json.dumps(
+                    {"reason": "cardinality_violation",
+                     "rule": "UNIQUE(child_org_id)"}, ensure_ascii=False,
+                ),
+            )
+            return
+        kg.record_existence_claim(
+            db, "org_hierarchy", oid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+
+
+def _route_weak(
+    db,
+    subj_table: str,
+    subj_id: int,
+    predicate: str,
+    obj_table: str | None,
+    obj_id: int | None,
+    doc_id: int,
+    r: RelationExtraction,
+) -> None:
+    kg.add_weak_relation(
+        db,
+        subject_table=subj_table,
+        subject_id=subj_id,
+        predicate=predicate,
+        object_table=obj_table,
+        object_id=obj_id,
+        document_id=doc_id,
+        evidence=r.evidence,
+        confidence=min(r.confidence, 0.3),
+    )
+
+
+def _route_weak_extraction(db, w: WeakRelationExtraction, doc_id: int, name_to_id: dict) -> None:
+    """LLM が直接 weak_relations に積むよう指示した主張を取り込む。"""
+    subj = None
+    for tbl in kg.ENTITY_TABLES:
+        eid = name_to_id.get((tbl, w.subject))
+        if eid is not None:
+            subj = (tbl, eid)
+            break
+    if subj is None:
+        return
+    obj_table = obj_id = None
+    for tbl in kg.ENTITY_TABLES:
+        eid = name_to_id.get((tbl, w.object))
+        if eid is not None:
+            obj_table, obj_id = tbl, eid
+            break
+    kg.add_weak_relation(
+        db,
+        subject_table=subj[0],
+        subject_id=subj[1],
+        predicate=w.predicate,
+        object_table=obj_table,
+        object_id=obj_id,
+        object_text=None if obj_id else w.object,
+        document_id=doc_id,
+        evidence=w.evidence,
+        confidence=w.confidence,
+    )
+
+
+def _auto_promote_weak_predicates(db) -> int:
+    """N≥WEAK_RELATION_PROMOTION_N 件 蓄積した weak_relations.predicate を schema_proposal 化."""
+    rows = db.execute(
+        "SELECT predicate, COUNT(*) n FROM weak_relations WHERE promoted_to IS NULL "
+        "GROUP BY predicate HAVING n >= ?",
+        (config.WEAK_RELATION_PROMOTION_N,),
+    ).fetchall()
+    n_proposed = 0
+    for r in rows:
+        # 既に同じ proposal がある場合はスキップ
+        exists = db.execute(
+            "SELECT 1 FROM schema_proposals WHERE kind='new_table' AND target_table=?"
+            " AND status IN ('pending','approved')",
+            (r["predicate"],),
+        ).fetchone()
+        if exists:
+            continue
+        kg.add_schema_proposal(
+            db,
+            kind="new_table",
+            target_table=r["predicate"],
+            proposed_ddl=(
+                f"-- weak_relations.predicate={r['predicate']!r} が {r['n']} 件蓄積。"
+                " 適切な junction DDL を人手で起こしてください。\n"
+                f"CREATE TABLE {r['predicate']}_PROPOSED (\n"
+                f"  id INTEGER PRIMARY KEY\n"
+                f"  -- TODO: subject/object FK と属性列を追加\n"
+                f");"
+            ),
+            rationale=f"auto-promotion: {r['n']} weak_relations rows",
+            requires_manual_dry_run=True,
+        )
+        n_proposed += 1
+    return n_proposed
+
+
+def _render_new_table_ddl(proposal) -> str:
+    cols = ",\n  ".join(
+        f"{c.name} {c.type}" for c in proposal.additional_columns
+    ) or "-- TODO: columns"
+    return (
+        f"CREATE TABLE {proposal.table} (\n"
+        f"  id INTEGER PRIMARY KEY,\n"
+        f"  canonical_name TEXT NOT NULL,\n"
+        f"  norm_key TEXT NOT NULL UNIQUE,\n"
+        f"  {cols},\n"
+        f"  created_at TEXT NOT NULL,\n"
+        f"  updated_at TEXT NOT NULL\n"
+        f");"
+    )
+
+
+# ---------- main ----------
+def ingest_file(path: str) -> dict:
+    src = config.ROOT / path
     body = src.read_text(encoding="utf-8", errors="replace")
     slug = src.stem
     title = slug.replace("-", " ")
@@ -193,78 +513,52 @@ def main():
     chunks = semantic_chunk(body, config.CHUNK_CHARS)
     print(f"[1] semantic chunking: {src.name} → {len(chunks)} chunk(s)")
 
-    print("[2] グラフ抽出（per-chunk + running entity hint）" if len(chunks) > 1 else "[2] グラフ抽出（full-text 1パス）")
-    ents, rels, facts = extract_graph_from_chunks(chunks)
-    print(f"  entities={len(ents)} relations={len(rels)} facts={len(facts)}")
+    print("[2] typed extract")
+    g = extract_graph_from_chunks(chunks)
+    print(f"  entities={len(g.entities)} relations={len(g.relations)} weak={len(g.weak_relations)}")
 
     db = kg.connect()
-    doc_id = kg.upsert_document(db, slug, title, str(src), body)
-    adjud = make_adjudicator()
+    counters: dict = {}
+    with kg.writer(db):
+        doc_id = kg.upsert_document(db, slug, title, str(src), body)
+        # ① entities
+        print("[3] resolve_or_stage (entities)")
+        name_to_id: dict[tuple[str, str], int] = {}
+        for e in g.entities:
+            eid = _resolve_entity(db, e, doc_id, counters)
+            if eid is not None:
+                name_to_id[(e.proposed_type, e.canonical_name)] = eid
+        # ② relations
+        print("[4] resolve_relation (junctions / weak / staging)")
+        for r in g.relations:
+            _resolve_relation(db, r, doc_id, name_to_id, counters)
+        # ③ weak
+        for w in g.weak_relations:
+            _route_weak_extraction(db, w, doc_id, name_to_id)
+        # ④ weak → schema_proposal 昇格
+        promoted = _auto_promote_weak_predicates(db)
+        if promoted:
+            counters["weak_promotions"] = promoted
 
-    print("[3] 突合（ルール → 曖昧時のみ SLM）")
-    name_to_id, how_count = {}, {}
-    for e in ents:
-        if not e.get("name"):
-            continue
-        eid, how = kg.find_or_stage_entity(
-            db, e["name"], e.get("type", "concept"), adjudicate=adjud
-        )
-        name_to_id[e["name"]] = eid
-        kg.add_mention(db, eid, doc_id, e["name"])
-        how_count[how] = how_count.get(how, 0) + 1
-
-    def resolve(nm):
-        if nm not in name_to_id:
-            eid, _ = kg.find_or_stage_entity(db, nm, "concept", adjudicate=adjud)
-            name_to_id[nm] = eid
-        return name_to_id[nm]
-
-    print("[4] 関係・属性の登録と矛盾検出")
-    conflicts = []
-    redirected = 0
-    for r in rels:
-        if not (r.get("subject") and r.get("object") and r.get("predicate")):
-            continue
-        if _looks_scalar_or_long(r["object"]):
-            _, st = kg.add_fact(
-                db, resolve(r["subject"]), r["predicate"], r["object"], doc_id
-            )
-            redirected += 1
-            if st == "conflict":
-                conflicts.append(f"属性矛盾: {r['subject']}.{r['predicate']} = {r['object']}")
-            continue
-        _, st = kg.add_relation(
-            db, resolve(r["subject"]), r["predicate"], resolve(r["object"]),
-            doc_id, r.get("evidence", ""),
-        )
-        if st == "conflict":
-            conflicts.append(f"関係矛盾: {r['subject']} -{r['predicate']}-> {r['object']}")
-    if redirected:
-        print(f"  関係 → 属性へ振替: {redirected} 件（数値・日付・長文 object）")
-    for f in facts:
-        if not (f.get("entity") and f.get("attribute")):
-            continue
-        _, st = kg.add_fact(db, resolve(f["entity"]), f["attribute"], f.get("value", ""), doc_id)
-        if st == "conflict":
-            conflicts.append(f"属性矛盾: {f['entity']}.{f['attribute']} = {f.get('value')}")
-
-    db.commit()
     logadd.add(
         "ingest", title,
-        f"entities={len(ents)} relations={len(rels)} facts={len(facts)} conflicts={len(conflicts)}",
+        f"entities={len(g.entities)} relations={len(g.relations)} weak={len(g.weak_relations)} "
+        f"counters={counters}",
     )
 
-    print("\n===== レビュー要約（人間が確認 → PR レビュー）=====")
+    print("\n===== レビュー要約 =====")
     print(f"文書: {title} (slug={slug})")
-    print(f"突合内訳: {how_count}  ※ new=新規 / llm-merge=SLM が同一判定 / exact,alias=規則一致")
-    if conflicts:
-        print("検出された矛盾（DB は非破壊保存・status=conflicted）:")
-        for c in conflicts:
-            print("  -", c)
-    else:
-        print("矛盾なし")
+    for k in sorted(counters):
+        print(f"  {k}: {counters[k]}")
     print("本文冒頭:\n" + textwrap.indent(body[:600], "  "))
-    print("==================================================")
+    return counters
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("usage: python tools/ingest.py raw/extracted/<file>.md")
+        return
+    ingest_file(sys.argv[1])
 
 
 if __name__ == "__main__":

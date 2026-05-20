@@ -1,0 +1,131 @@
+"""text2sql linter R1/R2 のテスト (docs/typed-schema-design.md §8)."""
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+
+import sql_linter  # noqa: E402
+
+
+# ---------- R1: claims.value への range / 比較 / 型変換 禁止 ----------
+
+def test_r1_range_on_canonical_ok():
+    sql = "SELECT canonical_name FROM person WHERE birth_date >= '1990-01-01'"
+    assert sql_linter.lint(sql) == []
+
+
+def test_r1_range_on_claims_value_blocked():
+    sql = "SELECT * FROM person_claims pc WHERE pc.value > '1990-01-01' AND pc.status='active'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R1" for x in v)
+
+
+def test_r1_between_on_claims_value_blocked():
+    sql = "SELECT * FROM organization_claims oc WHERE oc.value BETWEEN '2000' AND '2010' AND oc.status='active'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R1" for x in v)
+
+
+def test_r1_like_wildcard_on_claims_value_blocked():
+    sql = "SELECT * FROM person_claims pc WHERE pc.value LIKE '%foo%' AND pc.status='active'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R1" for x in v)
+
+
+def test_r1_like_no_wildcard_on_claims_value_ok():
+    sql = "SELECT * FROM person_claims pc WHERE pc.value LIKE 'foo' AND pc.status='active'"
+    assert sql_linter.lint(sql) == []
+
+
+def test_r1_cast_on_claims_value_blocked():
+    sql = "SELECT * FROM person_claims pc WHERE CAST(pc.value AS INTEGER) > 1990 AND pc.status='active'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R1" for x in v)
+
+
+def test_r1_date_func_on_claims_value_blocked():
+    sql = "SELECT * FROM person_claims pc WHERE DATE(pc.value) >= '1990-01-01' AND pc.status='active'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R1" for x in v)
+
+
+def test_r1_equality_on_claims_value_ok():
+    sql = "SELECT * FROM person_claims pc WHERE pc.value = '1990-01-01' AND pc.status='active'"
+    assert sql_linter.lint(sql) == []
+
+
+# ---------- R2: claims アクセスには status フィルタ必須 ----------
+
+def test_r2_missing_status_blocked():
+    sql = "SELECT value FROM person_claims WHERE person_id=1 AND column_name='birth_date'"
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R2" for x in v)
+
+
+def test_r2_status_in_where_ok():
+    sql = "SELECT value FROM person_claims WHERE person_id=1 AND status='active'"
+    assert sql_linter.lint(sql) == []
+
+
+def test_r2_status_in_list_ok():
+    sql = "SELECT value FROM person_claims WHERE status IN ('active','superseded')"
+    assert sql_linter.lint(sql) == []
+
+
+def test_r2_existence_claims_need_status():
+    sql = (
+        "SELECT COUNT(*) FROM employment_existence_claims ec "
+        "WHERE ec.employment_id=1"
+    )
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R2" for x in v)
+
+
+def test_r2_aggregate_status_exempt():
+    """SELECT status, COUNT(*) FROM ... GROUP BY status は status フィルタ免除."""
+    sql = "SELECT status, COUNT(*) FROM person_claims GROUP BY status"
+    assert sql_linter.lint(sql) == []
+
+
+def test_r2_join_alias_status_filter_ok():
+    sql = (
+        "SELECT c.value FROM employment_claims c JOIN employment e ON e.id=c.employment_id "
+        "WHERE c.column_name='role' AND c.status='active'"
+    )
+    assert sql_linter.lint(sql) == []
+
+
+def test_r2_join_alias_status_missing_blocked():
+    sql = (
+        "SELECT c.value FROM employment_claims c JOIN employment e ON e.id=c.employment_id "
+        "WHERE c.column_name='role'"
+    )
+    v = sql_linter.lint(sql)
+    assert any(x.rule == "R2" for x in v)
+
+
+# ---------- 受け入れ基準: 正当な claims クエリは通る ----------
+
+def test_role_history_query_passes():
+    sql = (
+        "SELECT c.value, c.created_at, c.document_id FROM employment_claims c "
+        "JOIN employment e ON e.id=c.employment_id "
+        "WHERE e.person_id=1 AND c.column_name='role' AND c.status IN ('active','superseded') "
+        "ORDER BY c.created_at"
+    )
+    assert sql_linter.lint(sql) == []
+
+
+def test_evidence_count_query_passes():
+    sql = (
+        "SELECT COUNT(DISTINCT document_id) FROM person_claims "
+        "WHERE person_id=1 AND column_name='birth_date' AND status='active'"
+    )
+    assert sql_linter.lint(sql) == []
+
+
+def test_current_conflicts_query_passes():
+    sql = "SELECT * FROM person_claims WHERE status='conflicted'"
+    assert sql_linter.lint(sql) == []

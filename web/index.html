@@ -204,8 +204,11 @@
   <nav>
     <a data-v="overview" class="on">Overview</a>
     <a data-v="entities">Entities</a>
-    <a data-v="graph">Graph</a>
     <a data-v="conflicts">Conflicts</a>
+    <div class="sep"></div>
+    <a data-v="proposals">Proposals</a>
+    <a data-v="staging">Staging</a>
+    <a data-v="weak">Weak Rels</a>
     <div class="sep"></div>
     <a data-v="ask">Ask</a>
     <a data-v="eval">Eval</a>
@@ -234,22 +237,24 @@
       </div>
     </section>
 
-    <section class="view" id="graph">
-      <h2>Graph</h2>
-      <div class="legend">
-        <span><i style="background:#c4f24a"></i>org</span>
-        <span><i style="background:#5ec8ff"></i>person</span>
-        <span><i style="background:#e0a64a"></i>product/project</span>
-        <span><i style="background:#9a8cff"></i>concept</span>
-        <span><i style="background:#ff5468"></i>矛盾エッジ</span>
-        <span style="color:var(--faint)">ノードクリックで近傍展開</span>
-      </div>
-      <div id="cy"></div>
-    </section>
-
     <section class="view" id="conflicts">
       <h2>Conflicts</h2>
       <div id="cflist"></div>
+    </section>
+
+    <section class="view" id="proposals">
+      <h2>Schema Proposals</h2>
+      <div id="plist"></div>
+    </section>
+
+    <section class="view" id="staging">
+      <h2>Staging Extractions</h2>
+      <div id="slist"></div>
+    </section>
+
+    <section class="view" id="weak">
+      <h2>Weak Relations</h2>
+      <div id="wlist"></div>
     </section>
 
     <section class="view" id="eval">
@@ -287,31 +292,39 @@ document.querySelectorAll('nav a').forEach(a=>a.onclick=()=>{
   document.querySelectorAll('nav a').forEach(x=>x.classList.remove('on'));
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
   a.classList.add('on'); $('#'+a.dataset.v).classList.add('on');
-  if(a.dataset.v==='graph') drawGraph(0);
   if(a.dataset.v==='conflicts') loadConflicts();
+  if(a.dataset.v==='proposals') loadProposals();
+  if(a.dataset.v==='staging') loadStaging();
+  if(a.dataset.v==='weak') loadWeak();
+  if(a.dataset.v==='entities') loadEntities();
   if(a.dataset.v==='eval') loadEvalRuns();
 });
 
 async function boot(){
   const s=await api('/api/stats');
+  const totalEnt=Object.values(s.entities||{}).reduce((a,b)=>a+b,0);
+  const totalRel=Object.values(s.relations||{}).reduce((a,b)=>a+b,0);
   $('#chips').innerHTML=
-    `<span class="chip">ENT <b>${s.entities}</b></span>`+
-    `<span class="chip">REL <b>${s.relations}</b></span>`+
-    `<span class="chip ${s.conflicts?'warn':''}">CONFLICT <b>${s.conflicts}</b></span>`;
+    `<span class="chip">ENT <b>${totalEnt}</b></span>`+
+    `<span class="chip">REL <b>${totalRel}</b></span>`+
+    `<span class="chip ${s.open_conflicts?'warn':''}">CONFLICT <b>${s.open_conflicts||0}</b></span>`+
+    `<span class="chip ${s.pending_proposals?'warn':''}">PROP <b>${s.pending_proposals||0}</b></span>`+
+    `<span class="chip ${s.pending_staging?'warn':''}">STAGE <b>${s.pending_staging||0}</b></span>`;
   $('#kpis').innerHTML=[
-    ['documents',s.documents],['entities',s.entities],['relations',s.relations],
-    ['facts',s.facts],['conflicts',s.conflicts]
+    ['documents',s.documents],['entities',totalEnt],['relations',totalRel],
+    ['weak',s.weak_relations||0],['conflicts',s.open_conflicts||0]
   ].map(([l,n],i)=>`<div class="kpi ${l==='conflicts'&&n?'warn':''}">
      <div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
-  const mx=Math.max(1,...s.by_type.map(t=>t.n));
-  $('#types').innerHTML=s.by_type.length?s.by_type.map(t=>
+  const byType=Object.entries(s.entities||{}).map(([type,n])=>({type,n}));
+  const mx=Math.max(1,...byType.map(t=>t.n));
+  $('#types').innerHTML=byType.length?byType.map(t=>
     `<div class="bar"><span class="name">${t.type}</span>
      <span class="track"><span class="fill" style="width:${t.n/mx*100}%"></span></span>
      <span class="v">${t.n}</span></div>`).join(''):'<div class="empty">データ無し</div>';
-  const filt=['', ...s.by_type.map(t=>t.type)];
+  const filt=['', ...byType.map(t=>t.type)];
   $('#efilters').innerHTML=filt.map(t=>
     `<span class="f ${t===curType?'on':''}" data-t="${t}">${t||'all'}</span>`).join('');
-  document.querySelectorAll('.f').forEach(f=>f.onclick=()=>{curType=f.dataset.t;boot();loadEntities();});
+  document.querySelectorAll('.f').forEach(f=>f.onclick=()=>{curType=f.dataset.t;loadEntities();});
   const d=await api('/api/documents');
   $('#docs').innerHTML=d.length?d.slice(0,12).map(x=>
     `<div class="row"><b>${x.title||x.slug}</b><span>${x.ingested_at}</span></div>`).join('')
@@ -320,66 +333,125 @@ async function boot(){
 
 async function loadEntities(){
   const q=encodeURIComponent($('#esearch').value);
-  const list=await api(`/api/entities?q=${q}&type=${encodeURIComponent(curType)}`);
-  $('#elist').innerHTML=list.length?list.map(e=>
-    `<div class="item" data-id="${e.id}"><span class="nm">${e.canonical_name}</span>
-     <span class="ty">${e.type}</span></div>`).join(''):'<div class="empty">該当無し</div>';
+  const tables=curType?[curType]:['person','organization','product','project'];
+  const all=[];
+  for(const t of tables){
+    const list=await api(`/api/${t}/list?q=${q}`);
+    list.forEach(e=>all.push({...e,_table:t}));
+  }
+  $('#elist').innerHTML=all.length?all.map(e=>
+    `<div class="item" data-id="${e.id}" data-table="${e._table}">
+       <span class="nm">${e.canonical_name}</span>
+       <span class="ty">${e._table}</span></div>`).join(''):'<div class="empty">該当無し</div>';
   document.querySelectorAll('#elist .item').forEach(it=>it.onclick=()=>{
     document.querySelectorAll('#elist .item').forEach(x=>x.classList.remove('on'));
-    it.classList.add('on'); showEntity(it.dataset.id);
+    it.classList.add('on'); showEntity(it.dataset.table, it.dataset.id);
   });
 }
 $('#esearch').oninput=()=>loadEntities();
 
-async function showEntity(id){
-  const d=await api('/api/entity/'+id);
-  const flag=st=>st==='conflicted'?' <span class="flag">CONFLICT</span>':'';
-  const fa=d.facts.map(f=>`<div class="kv"><span class="k">${f.a}</span>
-     <span>${f.v}${flag(f.st)}</span><span class="src">${f.src}</span></div>`).join('')||'<div class="empty">—</div>';
-  const ro=d.out.map(r=>`<div class="rel"><span class="pred">${r.p}</span>→
-     <span class="lk" onclick="showEntity(${r.oid})">${r.o}</span>${flag(r.st)}
-     <span class="src" style="margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--faint)">${r.src}</span></div>`).join('')||'<div class="empty">—</div>';
-  const ri=d.in.map(r=>`<div class="rel"><span class="lk" onclick="showEntity(${r.sid})">${r.s}</span>
-     <span class="pred">${r.p}</span>→ <i style="color:var(--dim)">本実体</i>${flag(r.st)}</div>`).join('')||'<div class="empty">—</div>';
-  $('#edetail').innerHTML=`<div class="title">${d.entity.canonical_name}</div>
-    <div class="sub">${d.entity.type} · #${d.entity.id} · alias: ${d.aliases.join(' / ')||'—'}</div>
-    <div class="sect">Facts</div>${fa}
-    <div class="sect">Relations · out</div>${ro}
-    <div class="sect">Relations · in</div>${ri}`;
-}
-
-let cy;
-async function drawGraph(focus){
-  const g=await api('/api/graph?focus='+focus);
-  const col={org:'#c4f24a',person:'#5ec8ff',product:'#e0a64a',project:'#e0a64a',concept:'#9a8cff'};
-  cy=cytoscape({container:$('#cy'),
-    elements:[...g.nodes,...g.edges],
-    style:[
-      {selector:'node',style:{'background-color':e=>col[e.data('type')]||'#7f8a78',
-        'label':'data(label)','color':'#dfe6da','font-family':'IBM Plex Mono','font-size':10,
-        'text-valign':'bottom','text-margin-y':4,'width':16,'height':16}},
-      {selector:'edge',style:{'width':1,'line-color':'#2c3528','target-arrow-color':'#2c3528',
-        'target-arrow-shape':'triangle','curve-style':'bezier','label':'data(label)',
-        'font-family':'IBM Plex Mono','font-size':8,'color':'#525a4e','arrow-scale':.7}},
-      {selector:'edge[?conflict]',style:{'line-color':'#ff5468','target-arrow-color':'#ff5468',
-        'color':'#ff5468','width':2}}
-    ],
-    layout:{name:'cose',animate:false,nodeRepulsion:9000,idealEdgeLength:90}});
-  cy.on('tap','node',e=>drawGraph(e.target.id()));
+async function showEntity(table, id){
+  const d=await api(`/api/${table}/${id}`);
+  const flag=st=>st==='conflicted'?' <span class="flag">CONFLICT</span>':st==='superseded'?' <span class="flag" style="color:var(--faint);border-color:var(--faint)">OLD</span>':'';
+  const claims=d.claims.map(c=>`<div class="kv"><span class="k">${c.column_name}</span>
+     <span>${esc(c.value)} (${(+c.confidence).toFixed(2)})${flag(c.status)}</span>
+     <span class="src">${c.doc_slug}</span></div>`).join('')||'<div class="empty">—</div>';
+  const rel=(d.relations||[]).map(r=>{
+    const parts=Object.entries(r).filter(([k,v])=>v!==null&&v!==undefined&&k!=='id').map(([k,v])=>`${k}=${esc(v)}`).join(' · ');
+    return `<div class="rel"><span class="pred">#${r.id}</span><span>${parts}</span></div>`;
+  }).join('')||'<div class="empty">—</div>';
+  const ment=(d.mentions||[]).map(m=>`<div class="row"><b>${esc(m.surface_form)}</b><span>${m.doc_slug}</span></div>`).join('')||'<div class="empty">—</div>';
+  $('#edetail').innerHTML=`<div class="title">${esc(d.entity.canonical_name)}</div>
+    <div class="sub">${table} · #${d.entity.id} · alias: ${d.aliases.join(' / ')||'—'}</div>
+    <div class="sect">Claims</div>${claims}
+    <div class="sect">Relations</div>${rel}
+    <div class="sect">Mentions</div>${ment}`;
 }
 
 async function loadConflicts(){
-  const c=await api('/api/conflicts');
-  let h='';
-  if(c.relations.length){h+='<div class="sect" style="margin-top:0">関係の矛盾</div>';
-    c.relations.forEach(g=>{h+=`<div class="cfg"><div class="h">group ${g.group} · ${g.members.length} 件</div>`+
-      g.members.map(m=>`<div class="m"><b>${m.s}</b> —${m.p}→ <b>${m.o}</b>
-        <span class="s">${m.src}</span></div>`).join('')+'</div>';});}
-  if(c.facts.length){h+='<div class="sect">属性の矛盾</div>';
-    c.facts.forEach(g=>{h+=`<div class="cfg"><div class="h">group ${g.group} · ${g.members.length} 件</div>`+
-      g.members.map(m=>`<div class="m"><b>${m.n}</b>.${m.a} = <b>${m.v}</b>
-        <span class="s">${m.src}</span></div>`).join('')+'</div>';});}
-  $('#cflist').innerHTML=h||'<div class="empty">矛盾は検出されていません</div>';
+  const groups=await api('/api/conflicts');
+  if(!groups.length){$('#cflist').innerHTML='<div class="empty">矛盾は検出されていません</div>';return;}
+  $('#cflist').innerHTML=groups.map(g=>
+    `<div class="cfg"><div class="h">group ${g.group} · ${g.kind} · ${g.members.length} 件</div>`+
+    g.members.map(m=>`<div class="m"><b>${esc(m.value!==undefined?m.value:'(existence)')}</b>
+       <span style="color:var(--dim)">conf=${(+m.confidence).toFixed(2)} · ${m.status}</span>
+       <span class="s">${m.doc_slug}</span></div>`).join('')+'</div>'
+  ).join('');
+}
+
+// ----- Schema Proposals review -----
+async function loadProposals(){
+  const rows=await api('/api/proposals');
+  if(!rows.length){$('#plist').innerHTML='<div class="empty">pending な proposal はありません</div>';return;}
+  $('#plist').innerHTML=rows.map(p=>`
+    <div class="cfg">
+      <div class="h">#${p.id} · ${p.kind} · ${p.target_table||'—'}${p.requires_manual_dry_run?' · MANUAL':''}</div>
+      <div class="m"><pre class="sql" style="margin:0;flex:1">${esc(p.proposed_ddl)}</pre></div>
+      <div class="m"><span style="color:var(--dim)">${esc(p.rationale||'')}</span></div>
+      <div class="m">
+        <button class="ghost" onclick="validateProposal(${p.id})">Validate</button>
+        <button onclick="approveProposal(${p.id})">Approve</button>
+        <button class="ghost" onclick="rejectProposal(${p.id})">Reject</button>
+        <span id="presult-${p.id}" style="margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--dim)"></span>
+      </div>
+    </div>`).join('');
+}
+async function validateProposal(id){
+  const r=await api(`/api/proposals/${id}/validate`);
+  const el=$('#presult-'+id);
+  if(!r.ast_ok){el.innerHTML='<span style="color:var(--warn)">AST FAIL: '+esc(r.ast_reason)+'</span>';return;}
+  if(!r.dry_ok){el.innerHTML='<span style="color:var(--warn)">DRY FAIL: '+esc(r.dry_reason)+'</span>';return;}
+  el.innerHTML='<span style="color:#4dd28c">OK · diff: '+(r.diff||[]).length+' objects</span>';
+}
+async function approveProposal(id){
+  const r=await fetch(`/api/proposals/${id}/approve`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(x=>x.json());
+  const el=$('#presult-'+id);
+  if(r.error){el.innerHTML='<span style="color:var(--warn)">'+esc(r.error)+': '+esc(r.reason||'')+'</span>';}
+  else{el.innerHTML='<span style="color:#4dd28c">applied as migration '+r.applied_migration+'</span>';setTimeout(loadProposals,1200);}
+}
+async function rejectProposal(id){
+  await fetch(`/api/proposals/${id}/reject`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  loadProposals();
+}
+
+// ----- Staging review -----
+async function loadStaging(){
+  const rows=await api('/api/staging');
+  if(!rows.length){$('#slist').innerHTML='<div class="empty">pending な staging はありません</div>';return;}
+  $('#slist').innerHTML=rows.map(s=>`
+    <div class="cfg">
+      <div class="h">#${s.id} · ${s.proposed_table||'—'} · ${s.doc_slug}</div>
+      <div class="m"><pre class="sql" style="margin:0;flex:1">${esc(s.raw_payload)}</pre></div>
+      <div class="m"><span style="color:var(--dim)">match: ${esc(s.match_summary||'')}</span></div>
+      <div class="m">
+        <button onclick="decideStaging(${s.id})">Assign</button>
+        <button class="ghost" onclick="rejectStaging(${s.id})">Reject</button>
+      </div>
+    </div>`).join('');
+}
+async function decideStaging(id){
+  const table=prompt('decided_table (assign to):','');
+  if(!table)return;
+  await fetch(`/api/staging/${id}/decide`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decided_table:table})});
+  loadStaging();
+}
+async function rejectStaging(id){
+  await fetch(`/api/staging/${id}/reject`,{method:'POST'});
+  loadStaging();
+}
+
+// ----- Weak Relations triage -----
+async function loadWeak(){
+  const rows=await api('/api/weak_relations');
+  if(!rows.length){$('#wlist').innerHTML='<div class="empty">weak_relations 未蓄積</div>';return;}
+  $('#wlist').innerHTML='<div class="sect" style="margin-top:0">predicate サマリ (click で promote)</div>'+
+    rows.map(r=>`<div class="row" onclick="promoteWeak('${esc(r.predicate)}')" style="cursor:pointer">
+      <b>${esc(r.predicate)}</b><span>${r.n||r.confidence||''}</span></div>`).join('');
+}
+async function promoteWeak(predicate){
+  if(!confirm('promote "'+predicate+'" to schema_proposal?'))return;
+  await fetch('/api/weak_relations/promote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({predicate})});
+  loadWeak();
 }
 
 $('#run').onclick=async()=>{

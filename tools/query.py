@@ -1,4 +1,4 @@
-"""質問応答。text2sql で構造化取得 → 自己修復 → fallback (FTS のみ)。
+"""質問応答。typed schema 用 text2sql + R1/R2 linter + FTS fallback.
 
 CLI:
   python tools/query.py "Acme の CEO は誰？"
@@ -12,8 +12,9 @@ import struct
 import sys
 
 import config
-import llm
 import db as kg
+import llm
+import sql_linter
 
 
 FORBIDDEN = re.compile(r"\b(insert|update|delete|drop|alter|create|attach|pragma|replace)\b", re.I)
@@ -29,6 +30,8 @@ def validate_sql(sql: str) -> str:
         raise ValueError("書き込み/DDL 系キーワードは不可")
     if not re.search(r"(?i)\blimit\b", sql):
         sql += " LIMIT 50"
+    # §8 linter R1/R2 (typed-schema-design)
+    sql_linter.lint_or_raise(sql)
     return sql
 
 
@@ -38,6 +41,7 @@ def run_ro(sql: str):
     return [dict(r) for r in db.execute(sql).fetchall()]
 
 
+# ---------- embed cache (旧実装を流用) ----------
 def _embed_cache_conn() -> sqlite3.Connection:
     config.EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
     c = sqlite3.connect(config.EMBED_CACHE_DB)
@@ -78,13 +82,12 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return s / ((sa ** 0.5) * (sb ** 0.5))
 
 
-def column_hints(question: str) -> str:
-    """text2sql 修復用のヒント文字列。失敗時のみ呼ぶ前提（DB 全値 scan を含むため）。
+# ---------- typed schema 用 column_hints ----------
+_ENTITY_TABLES = ("person", "organization", "product", "project")
 
-    - 自由値列（canonical_name, alias, facts.value）は Trigram と埋め込みの和集合で top-K。
-    - 小規模カテゴリ列（type/predicate/attribute）は distinct 値の語彙を列挙。
-    - Ollama embed が落ちていれば埋め込み信号は無効化し、Trigram のみで縮退する。
-    """
+
+def column_hints(question: str) -> str:
+    """text2sql 修復用のヒント。typed schema では canonical_name と alias を中心に拾う。"""
     qn = kg.normalize(question)
     if not qn:
         return ""
@@ -93,76 +96,51 @@ def column_hints(question: str) -> str:
     db = kg.connect(readonly=True)
     lines: list[str] = []
 
-    free_cols = [
-        ("entities.canonical_name",
-         "SELECT DISTINCT canonical_name AS v, norm_key AS nk "
-         "FROM entities WHERE status!='merged'"),
-        ("entity_aliases.alias",
-         "SELECT DISTINCT alias AS v, norm_key AS nk FROM entity_aliases"),
-        ("facts.value",
-         "SELECT DISTINCT value AS v FROM facts "
-         "WHERE status='active' AND value IS NOT NULL"),
-    ]
-    for col, sql in free_cols:
-        scored = []
-        for r in db.execute(sql):
-            v = r["v"]
-            if not v:
-                continue
-            keys = r.keys()
-            nk = r["nk"] if "nk" in keys and r["nk"] else kg.normalize(v)
-            sim_tri = kg.similarity(qn, nk)
-            contained = 1.0 if (nk and nk in qn) else 0.0
-            sim_emb = 0.0
-            if q_vec is not None:
-                v_vec = _embed_cached(v)
-                if v_vec is not None and len(v_vec) == len(q_vec):
-                    sim_emb = _cosine(q_vec, v_vec)
-            score = max(contained, sim_tri, sim_emb)
-            keep = (
-                contained == 1.0
-                or sim_tri >= config.HINT_TRIGRAM_THRESHOLD
-                or sim_emb >= config.HINT_EMBED_THRESHOLD
-            )
-            if keep:
-                scored.append((score, v))
-        scored.sort(key=lambda t: -t[0])
-        if scored:
-            picks = [f"'{v}'" for _, v in scored[: config.HINT_TOPK_PER_COLUMN]]
-            lines.append(f"- {col} に近い候補: " + ", ".join(picks))
-
-    vocab_cols = [
-        ("entities.type",
-         "SELECT DISTINCT type AS v FROM entities WHERE status!='merged'"),
-        ("relations.predicate",
-         "SELECT DISTINCT predicate AS v FROM relations WHERE status='active'"),
-        ("facts.attribute",
-         "SELECT DISTINCT attribute AS v FROM facts WHERE status='active'"),
-    ]
-    for col, sql in vocab_cols:
-        vals = [r["v"] for r in db.execute(sql) if r["v"]]
-        if not vals:
-            continue
-        if len(vals) <= config.HINT_VOCAB_CAP:
-            shown = vals
-            tail = ""
-        else:
-            # 語彙が多い列は質問との類似で top-K を選ぶ（insertion order だと
-            # 質問に効く語が末尾に埋もれて切られる失敗が出る）。
+    for tbl in _ENTITY_TABLES:
+        free_cols = [
+            (f"{tbl}.canonical_name",
+             f"SELECT DISTINCT canonical_name AS v, norm_key AS nk FROM {tbl}"),
+            (f"{tbl}_aliases.alias",
+             f"SELECT DISTINCT alias AS v, norm_key AS nk FROM {tbl}_aliases"),
+        ]
+        for col, sql in free_cols:
             scored = []
-            for v in vals:
-                nk = kg.normalize(v)
+            for r in db.execute(sql):
+                v = r["v"]
+                if not v:
+                    continue
+                nk = r["nk"] if r["nk"] else kg.normalize(v)
                 sim_tri = kg.similarity(qn, nk)
+                contained = 1.0 if (nk and nk in qn) else 0.0
                 sim_emb = 0.0
                 if q_vec is not None:
-                    vv = _embed_cached(v)
-                    if vv is not None and len(vv) == len(q_vec):
-                        sim_emb = _cosine(q_vec, vv)
-                scored.append((max(sim_tri, sim_emb), v))
+                    v_vec = _embed_cached(v)
+                    if v_vec is not None and len(v_vec) == len(q_vec):
+                        sim_emb = _cosine(q_vec, v_vec)
+                score = max(contained, sim_tri, sim_emb)
+                keep = (
+                    contained == 1.0
+                    or sim_tri >= config.HINT_TRIGRAM_THRESHOLD
+                    or sim_emb >= config.HINT_EMBED_THRESHOLD
+                )
+                if keep:
+                    scored.append((score, v))
             scored.sort(key=lambda t: -t[0])
-            shown = [v for _, v in scored[: config.HINT_VOCAB_CAP]]
-            tail = ", ..."
-        lines.append(f"- {col} の語彙: " + ", ".join(shown) + tail)
+            if scored:
+                picks = [f"'{v}'" for _, v in scored[: config.HINT_TOPK_PER_COLUMN]]
+                lines.append(f"- {col} に近い候補: " + ", ".join(picks))
+
+    # organization.org_type の enum は schema CHECK で固定なので語彙提示は不要だが、
+    # ユーザ向けに念のため出す
+    vocab = [
+        ("organization.org_type",
+         ("company", "lab", "team", "university", "government", "nonprofit", "other")),
+        ("employment_claims.column_name", ("role", "end_date")),
+        ("person_claims.column_name", ("canonical_name", "birth_date", "nationality")),
+    ]
+    for col, vals in vocab:
+        if vals:
+            lines.append(f"- {col} の語彙: " + ", ".join(vals))
 
     if not lines:
         return ""
@@ -170,13 +148,11 @@ def column_hints(question: str) -> str:
     return block[: config.HINT_MAX_CHARS]
 
 
+# ---------- text2sql + linter retry ----------
 def text2sql(question: str):
-    """text2sql 本体。
-
-    1. 素のプロンプトで SQL を生成し実行する。
-    2. 構文・実行エラー、または rows==[] のいずれも修復対象とする。修復は
-       column_hints を注入して 1 回だけ。「0行=正解」と「0行=外し」は区別
-       できないので、ヒントを与えても 0 行ならそのまま返す。
+    """1) 素のプロンプト → validate (R1/R2 含む) → run。
+    2) エラー or 0 行なら column_hints + lint 違反内容を注入して 1 回 retry。
+    3) それでも失敗なら呼び出し元で FTS fallback。
     """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
     sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
@@ -198,20 +174,29 @@ def text2sql(question: str):
     llm.note("text2sql.retry_decision", reason="error" if err is not None else "zero_rows")
     hints = column_hints(question)
     llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
-    if not hints:
+
+    err_block = ""
+    if err is not None:
+        err_block = f"\n\n直前の SQL はエラー: {err}\n"
+        # linter エラーは内容を表示してプロンプトに反映
+        if "linter" in str(err).lower():
+            err_block += "上記 linter ルール R1/R2 を遵守して書き直すこと。\n"
+    elif sql is not None:
+        err_block = (
+            f"\n\n直前の SQL は構文OKだが 0 行だった:\n{sql}\n"
+            "LIKE パターンが質問語の英訳/言い換えで DB の実値と一致していない可能性が高い。"
+            "下記の候補語をそのまま LIKE のパターンに採用すること。\n"
+        )
+
+    if not hints and not err_block:
         if err is not None:
             raise err
         return sql, rows  # rows == [] 確定
 
-    err_block = f"\n\n直前の SQL はエラー: {err}" if err is not None else (
-        f"\n\n直前の SQL は構文OKだが 0 行だった:\n{sql}\n"
-        "失敗原因は LIKE のパターンが質問語の英訳/言い換えで、DB の実値と一致して"
-        "いない可能性が高い。下記の候補語をそのまま LIKE のパターンに採用すること。"
-    )
     fix = llm.ask(
         tmpl.replace("{QUESTION}", question)
         + err_block
-        + f"\n\n{hints}"
+        + (f"\n{hints}" if hints else "")
         + "\n修正後の SQL のみ:"
     )
     llm.note("text2sql.sql_raw", attempt=2, sql=fix)
@@ -223,14 +208,11 @@ def text2sql(question: str):
     except (ValueError, sqlite3.Error) as e2:
         llm.note("text2sql.validate" if isinstance(e2, ValueError) else "text2sql.run",
                  attempt=2, ok=False, error=f"{type(e2).__name__}: {e2}")
-        # 修復 SQL が壊れた: 初回 SQL が有効なら(空でも)それを返す。
-        # 初回も無効なら最初の error を上げる（より原因が近い）。
         if err is None:
             return sql, rows
         raise err
     if rows2 or err is not None:
         return sql2, rows2
-    # 修復後も 0 行: 初回の SQL のほうがヒント無しでも素直なので残す
     return sql, rows
 
 
@@ -239,8 +221,9 @@ def fts_docs(question: str, k: int = 4):
     q = " OR ".join(re.findall(r"\w{2,}", question))[:200] or question
     try:
         rows = db.execute(
-            "SELECT slug, snippet(doc_fts,2,'>>','<<','…',15) s "
-            "FROM doc_fts WHERE doc_fts MATCH ? LIMIT ?",
+            "SELECT d.slug, snippet(doc_fts,1,'>>','<<','…',15) s "
+            "FROM doc_fts JOIN documents d ON d.id=doc_fts.rowid "
+            "WHERE doc_fts MATCH ? LIMIT ?",
             (q, k),
         ).fetchall()
     except sqlite3.Error:
@@ -249,7 +232,6 @@ def fts_docs(question: str, k: int = 4):
 
 
 def answer_question(question: str) -> dict:
-    """構造化結果・SQL・文書・回答をまとめて返す（サーバ/CLI 共用）。"""
     llm.note("question", q=question)
     sql_used, error = None, None
     try:
@@ -270,7 +252,7 @@ def answer_question(question: str) -> dict:
             .replace("{DOCS}", "\n".join(f"({d['slug']}) {d['snippet']}" for d in docs) or "(なし)")
         )
         answer = llm.ask(prompt)
-    except Exception as e:  # noqa: BLE001  Ollama 未起動など
+    except Exception as e:  # noqa: BLE001
         error = (error + " / " if error else "") + f"回答生成失敗: {e}"
         llm.note("answer.failed", error=str(e))
 

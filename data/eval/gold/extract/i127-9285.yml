@@ -1,152 +1,82 @@
-# Graph 抽出 evaluator のゴールド。
-# data/eval/sources/i127-9285.md (IBM Bob サービス記述書) から人手アノテーション。
-#
-# このドキュメントは CHUNK_CHARS=6000 を超えるので semantic_chunk で複数 chunk に分割される。
-# extract_graph_from_chunks が per-chunk + running entity hint 経路を通る初の評価対象。
-#
-# 振り分けは prompts/extract_graph.txt のルールに準拠:
-#   - 数値・日付・期間・パーセント → facts
-#   - 別実体への参照 (人・組織・製品・概念) → relations
-schema_version: 1
+# Typed-schema extract gold (i127-9285)。starter (person/organization/product/project) 中心。
+# 元の concept 型 entity と product-product "オファリング/アドオン対象" 関係は starter には無いため
+# 大部分が weak_relations に積まれる想定 (将来の typed 化候補)。
+schema_version: 2
 doc_slug: i127-9285
 source: data/eval/sources/i127-9285.md
 
 entities:
-  # 提供元
-  - name: "IBM"
-    type: org
+  - proposed_type: organization
+    canonical_name: "IBM"
+    attributes:
+      org_type: company
 
-  # 主サービスと階層オファリング (§1.1)
-  - name: "IBM Bob"
-    type: product
+  # Bob 製品ファミリ
+  - proposed_type: product
+    canonical_name: "IBM Bob"
     aliases: ["Bob"]
-  - name: "IBM Bob Pro"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Pro"
     aliases: ["Bob Pro"]
-  - name: "IBM Bob Pro Plus"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Pro Plus"
     aliases: ["Bob Pro Plus"]
-  - name: "IBM Bob Ultra"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Ultra"
     aliases: ["Bob Ultra"]
-  - name: "IBM Bob Enterprise"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Enterprise"
     aliases: ["Bob Enterprise"]
-  - name: "IBM Bob 無料評価版"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob 無料評価版"
     aliases: ["Bob 無料評価版"]
 
-  # アドオン (§1.2)
-  - name: "IBM Bob Premium Package for Java Modernization Individual"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Premium Package for Java Modernization Individual"
     aliases: ["Bob Premium Package for Java Modernization Individual"]
-  - name: "IBM Bob Premium Package for Java Modernization Enterprise"
-    type: product
+  - proposed_type: product
+    canonical_name: "IBM Bob Premium Package for Java Modernization Enterprise"
     aliases: ["Bob Premium Package for Java Modernization Enterprise"]
 
-  # 計測単位 (リソース単位/RU と同義)
-  - name: "Bobcoin"
-    type: product
-    aliases: ["リソース単位", "RU"]
+  # 計測単位 (product として扱う妥当性は弱いが starter に課金単位の型は無いので
+  # ここでは weak 経由のほうが筋。entity 化はしない)
 
-  # 概念
-  - name: "Java"
-    type: concept
+  - proposed_type: product
+    canonical_name: "IBM WebSphere"
+  - proposed_type: product
+    canonical_name: "IBM WebSphere Liberty"
 
-  # 関連プロダクト (Java モダナイゼーションのリプラットフォーム対象)
-  - name: "IBM WebSphere"
-    type: product
-  - name: "IBM WebSphere Liberty"
-    type: product
-
-  # Enterprise 追加機能 (§1.1.4)
-  # 概念として entity 化し、表記揺れを alias で吸収する。
-  - name: "使用状況レポート"
-    type: concept
-    aliases: ["詳細な使用状況レポート"]
-  - name: "クォータ管理"
-    type: concept
-    aliases: ["個人およびチームのクォータ管理"]
-  - name: "SSO 統合"
-    type: concept
-    aliases: ["SSO", "シングルサインオン", "Single Sign-On"]
-
-  # イネーブリング・ソフトウェア (§5.1)
-  - name: "Bob-Shell"
-    type: product
-  - name: "Bob IDE"
-    type: product
+  - proposed_type: product
+    canonical_name: "Bob-Shell"
+  - proposed_type: product
+    canonical_name: "Bob IDE"
 
 relations:
-  # 提供元
-  - {subject: "IBM Bob", predicate: "提供元", object: "IBM"}
+  # manufacturing: 各 Bob 製品の製造元は IBM
+  - {proposed_junction: manufacturing, from: "IBM Bob",                                                         to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Pro",                                                     to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Pro Plus",                                                to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Ultra",                                                   to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Enterprise",                                              to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob 無料評価版",                                              to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Premium Package for Java Modernization Individual",      to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM Bob Premium Package for Java Modernization Enterprise",      to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM WebSphere",                                                   to: "IBM"}
+  - {proposed_junction: manufacturing, from: "IBM WebSphere Liberty",                                           to: "IBM"}
+  - {proposed_junction: manufacturing, from: "Bob-Shell",                                                       to: "IBM"}
+  - {proposed_junction: manufacturing, from: "Bob IDE",                                                         to: "IBM"}
 
-  # 計測単位
-  - {subject: "IBM Bob", predicate: "計測単位", object: "Bobcoin"}
-
-  # イネーブリング・ソフトウェア (§5.1)
-  - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob-Shell"}
-  - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob IDE"}
-
-  # オファリング階層
+weak_relations:
+  # オファリング階層 (将来の typed 化候補: product_hierarchy / offering_tier)
   - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Pro"}
   - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Pro Plus"}
   - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Ultra"}
   - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Enterprise"}
   - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob 無料評価版"}
-
-  # アドオン関係 (§1.2.1, §1.2.2)
+  # アドオン (将来の typed 化候補: product_addon)
   - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "アドオン対象", object: "IBM Bob Pro"}
   - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "アドオン対象", object: "IBM Bob Pro Plus"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "アドオン対象", object: "IBM Bob Ultra"}
   - {subject: "IBM Bob Premium Package for Java Modernization Enterprise", predicate: "アドオン対象", object: "IBM Bob Enterprise"}
-
-  # Java モダナイゼーションの対象技術 / リプラットフォーム
-  # § 1.2.2 は § 1.2.1 と同文言なので Enterprise 側にも同じ 3 件を持たせる。
-  - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "対象技術", object: "Java"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "リプラットフォーム元", object: "IBM WebSphere"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "リプラットフォーム先", object: "IBM WebSphere Liberty"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Enterprise", predicate: "対象技術", object: "Java"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Enterprise", predicate: "リプラットフォーム元", object: "IBM WebSphere"}
-  - {subject: "IBM Bob Premium Package for Java Modernization Enterprise", predicate: "リプラットフォーム先", object: "IBM WebSphere Liberty"}
-
-  # Enterprise 追加機能 (§1.1.4)
-  - {subject: "IBM Bob Enterprise", predicate: "追加機能", object: "使用状況レポート"}
-  - {subject: "IBM Bob Enterprise", predicate: "追加機能", object: "クォータ管理"}
-  - {subject: "IBM Bob Enterprise", predicate: "追加機能", object: "SSO 統合"}
-
-facts:
-  # オファリング毎の Bobcoin (§1.1.1〜§1.1.4)
-  # 数値+単位は原文表記。prompts/extract_graph.txt の「数値は原文どおり正確に」に従う。
-  - {entity: "IBM Bob Pro",        attribute: "月間Bobcoin",     value: "40 Bobcoin"}
-  - {entity: "IBM Bob Pro Plus",   attribute: "月間Bobcoin",     value: "160 Bobcoin"}
-  - {entity: "IBM Bob Ultra",      attribute: "月間Bobcoin",     value: "500 Bobcoin"}
-
-  # 無料評価版 (§1.1.5)
-  - {entity: "IBM Bob 無料評価版", attribute: "Bobcoin",         value: "40 Bobcoin"}
-  - {entity: "IBM Bob 無料評価版", attribute: "評価期間",        value: "30 日間"}
-
-  # Enterprise パック単位 (§1.1.4, §4.1)
-  - {entity: "IBM Bob Enterprise", attribute: "リソース単位パック", value: "1000 Bobcoin"}
-
-  # 換算
-  - {entity: "Bobcoin", attribute: "換算", value: "1 リソース単位"}
-
-  # Java バージョン (§1.2.1, §1.2.2)
-  - {entity: "Java", attribute: "移行元バージョン", value: "8"}
-  - {entity: "Java", attribute: "移行先バージョン", value: "25"}
-
-  # SLA (§3.1)
-  - {entity: "IBM Bob", attribute: "SLA 99.5%未満クレジット", value: "2%"}
-  - {entity: "IBM Bob", attribute: "SLA 99.0%未満クレジット", value: "5%"}
-  - {entity: "IBM Bob", attribute: "SLA 95.0%未満クレジット", value: "10%"}
-
-  # 無料評価版の対象外項目 (§3.1 末文, §3.2)
-  - {entity: "IBM Bob 無料評価版", attribute: "SLA",                 value: "対象外"}
-  - {entity: "IBM Bob 無料評価版", attribute: "テクニカル・サポート", value: "適用なし"}
-
-  # Enterprise の計測周期 / 課金粒度 (§1.1.4, §4.2)
-  # Pro/Pro Plus/Ultra は § 1.1.1-3 から月次。Enterprise だけ Bobcoin が年次、許可ユーザーは月次のハイブリッド。
-  - {entity: "IBM Bob Enterprise", attribute: "Bobcoin 計測周期",     value: "年次"}
-  - {entity: "IBM Bob Enterprise", attribute: "許可ユーザー計測周期", value: "月次"}
-  - {entity: "IBM Bob Enterprise", attribute: "超過課金単位",          value: "1000 リソース単位パック"}
+  # イネーブリング・ソフトウェア
+  - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob-Shell"}
+  - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob IDE"}
