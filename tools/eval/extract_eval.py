@@ -56,7 +56,7 @@ def evaluate(gold_path: Path, runs: int) -> dict:
             "facts_precision": prf_f["precision"],
             "facts_recall": prf_f["recall"],
             "facts_f1": prf_f["f1"],
-            "pred_counts": {"entities": len(ents), "relations": len(rels), "facts": len(facts)},
+            "pred_counts": {"entities": len(ents), "relations": len(rels), "weak_relations": len(_weak)},
             "trace": trace,
         })
 
@@ -105,5 +105,5 @@ def summary_text(result: dict) -> str:
     gs = result["gold_summary"]
     return (
         f"gold: doc={gs['doc_slug']}, "
-        f"entities={gs['n_entities']}, relations={gs['n_relations']}, facts={gs['n_facts']}"
+        f"entities={gs['n_entities']}, relations={gs['n_relations']}, attribute_claims={gs.get('n_attribute_claims', 0)}"
     )
