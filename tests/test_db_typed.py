@@ -23,6 +23,115 @@ def _person(conn, name="Alice") -> int:
 
 # ---------- 受け入れ基準: PRAGMA / FK / 起動 ----------
 
+def test_product_variant_starter(tmp_db):
+    """product_variant junction が starter に入っており、UNIQUE(variant) + cardinality
+    エスカレーションが動くこと。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db, "vd")
+        bob, _ = kg.upsert_entity(tmp_db, "product", "IBM Bob")
+        pro, _ = kg.upsert_entity(tmp_db, "product", "IBM Bob Pro")
+        plus, _ = kg.upsert_entity(tmp_db, "product", "IBM Bob Pro Plus")
+        # parent=Bob, variant=Pro → new
+        pvid, how, _ = kg.find_or_create_product_variant(tmp_db, bob, pro, doc, confidence=0.9)
+        assert how == "new"
+        # 同 pair 再投入 → existing
+        _, how, _ = kg.find_or_create_product_variant(tmp_db, bob, pro, doc, confidence=0.9)
+        assert how == "existing"
+        # variant=Pro に別 parent=Plus → cardinality_violation (variant は 1 parent のみ)
+        _, how, conflict = kg.find_or_create_product_variant(tmp_db, plus, pro, doc, confidence=0.9)
+        assert how == "cardinality_violation"
+        assert conflict == pvid
+        # existence claim も動く
+        kg.record_existence_claim(tmp_db, "product_variant", pvid, doc, confidence=0.9)
+    row = tmp_db.execute(
+        "SELECT COUNT(*) c FROM product_variant_existence_claims WHERE status='active'"
+    ).fetchone()
+    assert row["c"] == 1
+
+
+def test_product_variant_conflict_kind_seeded(tmp_db):
+    row = tmp_db.execute(
+        "SELECT kind FROM conflict_kinds WHERE kind='product_variant_existence'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_contract_entity_with_attributes(tmp_db):
+    """contract entity が starter に入り、SLA 数値属性が claims 経由で record できる。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db, "i127")
+        cid, _ = kg.upsert_entity(tmp_db, "contract", "i127-9285")
+        # SLA / RTO 数値属性
+        kg.record_claim(tmp_db, "contract", cid, "sla_uptime_percent", 99.9, doc, confidence=0.9)
+        kg.record_claim(tmp_db, "contract", cid, "rto_hours", 4, doc, confidence=0.9)
+        kg.record_claim(tmp_db, "contract", cid, "contract_type", "service_description", doc, confidence=0.9)
+    row = tmp_db.execute(
+        "SELECT sla_uptime_percent, rto_hours, contract_type FROM contract WHERE id=?", (cid,)
+    ).fetchone()
+    # canonical 反映を確認
+    assert float(row["sla_uptime_percent"]) == 99.9
+    assert float(row["rto_hours"]) == 4
+    assert row["contract_type"] == "service_description"
+
+
+def test_contract_sla_range_check(tmp_db):
+    """CHECK(sla_uptime_percent BETWEEN 0 AND 100)。100 超は reject される。"""
+    with kg.writer(tmp_db):
+        cid, _ = kg.upsert_entity(tmp_db, "contract", "BadSLA")
+    with pytest.raises(sqlite3.IntegrityError):
+        with kg.writer(tmp_db):
+            tmp_db.execute("UPDATE contract SET sla_uptime_percent=150 WHERE id=?", (cid,))
+
+
+def test_governance_junction_many_to_many(tmp_db):
+    """1 contract が複数 product を governs、1 product が複数 contract を持てる。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db, "cd")
+        bob, _ = kg.upsert_entity(tmp_db, "product", "IBM Bob")
+        watson, _ = kg.upsert_entity(tmp_db, "product", "Watson")
+        csa, _ = kg.upsert_entity(tmp_db, "contract", "IBM CSA")
+        sla, _ = kg.upsert_entity(tmp_db, "contract", "IBM Bob SLA")
+        # CSA は Bob と Watson 両方を governs
+        _, h1, _ = kg.find_or_create_governance(tmp_db, bob, csa, doc, confidence=0.9)
+        _, h2, _ = kg.find_or_create_governance(tmp_db, watson, csa, doc, confidence=0.9)
+        # Bob は CSA と SLA 両方に従う
+        _, h3, _ = kg.find_or_create_governance(tmp_db, bob, sla, doc, confidence=0.9)
+        # 重複は existing
+        _, h4, _ = kg.find_or_create_governance(tmp_db, bob, csa, doc, confidence=0.9)
+        assert (h1, h2, h3, h4) == ("new", "new", "new", "existing")
+
+
+def test_compliance_with_text_standard(tmp_db):
+    """compliance: standard_name は entity ではなくテキスト。複数基準を扱える。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db, "cd")
+        csa, _ = kg.upsert_entity(tmp_db, "contract", "IBM CSA")
+        _, h1, _ = kg.find_or_create_compliance(tmp_db, csa, "ISO 27001", doc,
+                                                 certified_until="2027-01-01", confidence=0.9)
+        _, h2, _ = kg.find_or_create_compliance(tmp_db, csa, "SOC 2 Type II", doc, confidence=0.9)
+        # 同じ standard 再登録は existing
+        _, h3, _ = kg.find_or_create_compliance(tmp_db, csa, "ISO 27001", doc, confidence=0.9)
+        assert (h1, h2, h3) == ("new", "new", "existing")
+    rows = tmp_db.execute(
+        "SELECT standard_name, certified_until FROM compliance WHERE contract_id=? ORDER BY standard_name",
+        (csa,),
+    ).fetchall()
+    names = [r["standard_name"] for r in rows]
+    assert "ISO 27001" in names and "SOC 2 Type II" in names
+
+
+def test_contract_entity_mention_check_enum_includes_contract(tmp_db):
+    """entity_mentions.entity_table CHECK enum に 'contract' が追加されていること。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db, "em")
+        cid, _ = kg.upsert_entity(tmp_db, "contract", "T1")
+        kg.add_mention(tmp_db, doc, "contract", cid, "T1")
+    row = tmp_db.execute(
+        "SELECT entity_table FROM entity_mentions WHERE entity_id=?", (cid,)
+    ).fetchone()
+    assert row["entity_table"] == "contract"
+
+
 def test_pragma_foreign_keys_on_every_connection(tmp_db):
     """db.py.connect() で FK が ON。受け入れ基準 1."""
     assert tmp_db.execute("PRAGMA foreign_keys").fetchone()[0] == 1

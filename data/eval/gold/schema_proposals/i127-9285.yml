@@ -1,24 +1,20 @@
 # Phase 4 schema_proposals gold (i127-9285)。
-# 「オファリング」predicate が 5 件あるので自動昇格対象。「アドオン対象」「イネーブリング・
-# ソフトウェア」は N < 5 なので weak のまま据え置きが正解。
+# product_variant が starter に入ったので、Bob ファミリのバリアント関係は
+# 既に typed として扱われる。残り weak (「アドオン対象」「イネーブリング・ソフト
+# ウェア」) は N < 5 なので自動昇格しない。
 schema_version: 1
 doc_slug: i127-9285
 source: data/eval/sources/i127-9285.md
 
-# オファリング predicate が WEAK_RELATION_PROMOTION_N=5 に達すると
-# _auto_promote_weak_predicates が schema_proposal を発火する想定。
-expected_proposals:
-  - kind: new_table
-    target_table: "オファリング"
-    rationale_keywords: ["auto-promotion", "weak_relations"]
+# 通常 ingest では proposal は出ない (全関係が starter)。
+expected_proposals: []
 
 # 通常 ingest では staging には積まれない (全 entity が starter)。
 expected_staging: []
 
-# weak_relations 自動昇格 (promoted_to 列が埋まる predicate)
-expected_weak_promotion:
-  - predicate: "オファリング"
-    becomes_junction: "オファリング"
+# 自動昇格対象なし。アドオン対象 (3 件) / イネーブリング・ソフトウェア (2 件) は
+# N=5 未満で weak のまま残る。
+expected_weak_promotion: []
 
 canonical_stability:
   max_flips_per_entity_column: 0

@@ -227,6 +227,59 @@ CREATE TABLE IF NOT EXISTS project_aliases (
 CREATE INDEX IF NOT EXISTS ix_project_claims_lookup ON project_claims(project_id, column_name, status);
 CREATE INDEX IF NOT EXISTS ix_project_aliases_nk    ON project_aliases(norm_key);
 
+-- contract ----------------------------------------------------
+-- サービス記述書/SLA/利用規約/セキュリティ補遺/DPA 等の法的文書を表す entity。
+-- 1 contract が 1 つの版 + 1 つの URL + 1 つの jurisdiction を持つ。版が変われば
+-- 別 contract 行を作って supersedes (Phase B) で繋ぐ運用を想定。
+CREATE TABLE IF NOT EXISTS contract (
+  id                 INTEGER PRIMARY KEY,
+  canonical_name     TEXT NOT NULL,
+  norm_key           TEXT NOT NULL UNIQUE,
+  contract_type      TEXT CHECK (contract_type IS NULL OR contract_type IN
+                       ('service_description','terms_of_service','sla',
+                        'security_addendum','data_processing','other')),
+  effective_date     TEXT,                       -- YYYY-MM-DD
+  valid_until        TEXT,                       -- YYYY-MM-DD or NULL
+  jurisdiction       TEXT,                       -- '日本' / 'New York, US' 等の自由文字列
+  url                TEXT,                       -- canonical URL
+  version            TEXT,                       -- 'v2024.1' 等
+  -- SLA 数値 (range クエリの主目的なので typed)
+  sla_uptime_percent          REAL CHECK (sla_uptime_percent IS NULL OR (sla_uptime_percent >= 0 AND sla_uptime_percent <= 100)),
+  sla_response_time_minutes   REAL CHECK (sla_response_time_minutes IS NULL OR sla_response_time_minutes >= 0),
+  -- BCP 数値
+  rto_hours          REAL CHECK (rto_hours IS NULL OR rto_hours >= 0),
+  rpo_hours          REAL CHECK (rpo_hours IS NULL OR rpo_hours >= 0),
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS contract_claims (
+  id          INTEGER PRIMARY KEY,
+  contract_id INTEGER NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  column_name TEXT NOT NULL
+              CHECK (column_name IN (
+                'canonical_name','contract_type','effective_date','valid_until',
+                'jurisdiction','url','version',
+                'sla_uptime_percent','sla_response_time_minutes',
+                'rto_hours','rpo_hours')),
+  value       TEXT,
+  document_id INTEGER NOT NULL REFERENCES documents(id),
+  evidence    TEXT,
+  confidence  REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  status      TEXT NOT NULL DEFAULT 'active'
+              CHECK (status IN ('active','conflicted','superseded')),
+  conflict_group INTEGER REFERENCES conflict_groups(id),
+  created_at  TEXT NOT NULL,
+  UNIQUE (contract_id, column_name, document_id)
+);
+CREATE TABLE IF NOT EXISTS contract_aliases (
+  contract_id INTEGER NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  alias       TEXT NOT NULL,
+  norm_key    TEXT NOT NULL,
+  PRIMARY KEY (contract_id, alias)
+);
+CREATE INDEX IF NOT EXISTS ix_contract_claims_lookup ON contract_claims(contract_id, column_name, status);
+CREATE INDEX IF NOT EXISTS ix_contract_aliases_nk    ON contract_aliases(norm_key);
+
 -- ============================================================
 -- 3. 関係 (junction tables) + existence_claims + 属性 claims
 -- ============================================================
@@ -333,12 +386,101 @@ CREATE TABLE IF NOT EXISTS org_hierarchy_existence_claims (
 );
 CREATE INDEX IF NOT EXISTS ix_org_hierarchy_ex_look ON org_hierarchy_existence_claims(org_hierarchy_id, status);
 
+-- product_variant -------------------------------------------
+-- product → product のバリアント関係 (Pro/Plus/Ultra/Enterprise/Trial 等)。
+-- parent: ファミリ代表、variant: バリアント。UNIQUE(variant_product_id) で
+-- 1 variant ≤ 1 parent を強制 (org_hierarchy と同じ単一親モデル)。
+CREATE TABLE IF NOT EXISTS product_variant (
+  id                 INTEGER PRIMARY KEY,
+  parent_product_id  INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
+  variant_product_id INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
+  document_id        INTEGER NOT NULL REFERENCES documents(id),
+  evidence           TEXT,
+  confidence         REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  conflict_group     INTEGER REFERENCES conflict_groups(id),
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  UNIQUE (variant_product_id)
+);
+CREATE TABLE IF NOT EXISTS product_variant_existence_claims (
+  id                 INTEGER PRIMARY KEY,
+  product_variant_id INTEGER NOT NULL REFERENCES product_variant(id) ON DELETE CASCADE,
+  document_id        INTEGER NOT NULL REFERENCES documents(id),
+  evidence           TEXT,
+  confidence         REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  status             TEXT NOT NULL DEFAULT 'active'
+                     CHECK (status IN ('active','conflicted','superseded')),
+  conflict_group     INTEGER REFERENCES conflict_groups(id),
+  created_at         TEXT NOT NULL,
+  UNIQUE (product_variant_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS ix_product_variant_ex_look ON product_variant_existence_claims(product_variant_id, status);
+
+-- governance --------------------------------------------------
+-- 製品 ↔ 契約 (多対多)。1 製品が複数契約に従う / 1 契約が複数製品を governs する。
+CREATE TABLE IF NOT EXISTS governance (
+  id              INTEGER PRIMARY KEY,
+  product_id      INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
+  contract_id     INTEGER NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  document_id     INTEGER NOT NULL REFERENCES documents(id),
+  evidence        TEXT,
+  confidence      REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  conflict_group  INTEGER REFERENCES conflict_groups(id),
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  UNIQUE (product_id, contract_id)
+);
+CREATE TABLE IF NOT EXISTS governance_existence_claims (
+  id             INTEGER PRIMARY KEY,
+  governance_id  INTEGER NOT NULL REFERENCES governance(id) ON DELETE CASCADE,
+  document_id    INTEGER NOT NULL REFERENCES documents(id),
+  evidence       TEXT,
+  confidence     REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  status         TEXT NOT NULL DEFAULT 'active'
+                 CHECK (status IN ('active','conflicted','superseded')),
+  conflict_group INTEGER REFERENCES conflict_groups(id),
+  created_at     TEXT NOT NULL,
+  UNIQUE (governance_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS ix_governance_ex_look ON governance_existence_claims(governance_id, status);
+
+-- compliance --------------------------------------------------
+-- 契約 ↔ 準拠基準名 (テキスト)。standard を typed entity 化するのは後段 (Phase B)。
+-- standard_name は自由テキスト ('ISO 27001', 'SOC 2 Type II', 'GDPR' 等)。
+CREATE TABLE IF NOT EXISTS compliance (
+  id              INTEGER PRIMARY KEY,
+  contract_id     INTEGER NOT NULL REFERENCES contract(id) ON DELETE CASCADE,
+  standard_name   TEXT NOT NULL,
+  certified_until TEXT,                  -- YYYY-MM-DD or NULL (期限なし)
+  document_id     INTEGER NOT NULL REFERENCES documents(id),
+  evidence        TEXT,
+  confidence      REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  conflict_group  INTEGER REFERENCES conflict_groups(id),
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL,
+  UNIQUE (contract_id, standard_name)
+);
+CREATE TABLE IF NOT EXISTS compliance_existence_claims (
+  id             INTEGER PRIMARY KEY,
+  compliance_id  INTEGER NOT NULL REFERENCES compliance(id) ON DELETE CASCADE,
+  document_id    INTEGER NOT NULL REFERENCES documents(id),
+  evidence       TEXT,
+  confidence     REAL NOT NULL DEFAULT 0.5 CHECK (confidence BETWEEN 0 AND 1),
+  status         TEXT NOT NULL DEFAULT 'active'
+                 CHECK (status IN ('active','conflicted','superseded')),
+  conflict_group INTEGER REFERENCES conflict_groups(id),
+  created_at     TEXT NOT NULL,
+  UNIQUE (compliance_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS ix_compliance_ex_look ON compliance_existence_claims(compliance_id, status);
+CREATE INDEX IF NOT EXISTS ix_compliance_standard ON compliance(standard_name);
+
 -- entity_mentions (per-document mention。existence_claims を持たない例外)
 CREATE TABLE IF NOT EXISTS entity_mentions (
   id           INTEGER PRIMARY KEY,
   document_id  INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   entity_table TEXT NOT NULL
-               CHECK (entity_table IN ('person','organization','product','project')),
+               CHECK (entity_table IN ('person','organization','product','project','contract')),
   entity_id    INTEGER NOT NULL,
   surface_form TEXT,
   span_start   INTEGER,
@@ -353,11 +495,11 @@ CREATE INDEX IF NOT EXISTS ix_em_entity ON entity_mentions(entity_table, entity_
 CREATE TABLE IF NOT EXISTS weak_relations (
   id              INTEGER PRIMARY KEY,
   subject_table   TEXT NOT NULL
-                  CHECK (subject_table IN ('person','organization','product','project')),
+                  CHECK (subject_table IN ('person','organization','product','project','contract')),
   subject_id      INTEGER NOT NULL,
   predicate       TEXT NOT NULL,
   object_table    TEXT
-                  CHECK (object_table IS NULL OR object_table IN ('person','organization','product','project')),
+                  CHECK (object_table IS NULL OR object_table IN ('person','organization','product','project','contract')),
   object_id       INTEGER,
   object_text     TEXT,
   document_id     INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,

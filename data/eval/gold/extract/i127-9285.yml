@@ -51,6 +51,25 @@ entities:
   - proposed_type: product
     canonical_name: "Bob IDE"
 
+  # 本文書自体: サービス記述書 contract entity
+  - proposed_type: contract
+    canonical_name: "i127-9285"
+    aliases: ["サービス記述書 i127-9285", "サービス記述書i127-9285", "本サービス記述書"]
+    attributes:
+      contract_type: service_description
+  # 本文書から参照される外部契約
+  - proposed_type: contract
+    canonical_name: "クラウド・サービス契約"
+    aliases: ["クラウドサービス契約書", "CSA", "Cloud Service Agreement"]
+    attributes:
+      contract_type: terms_of_service
+      url: "http://www.ibm.com/terms/csa"
+  - proposed_type: contract
+    canonical_name: "データ処理補遺"
+    aliases: ["DPA", "Data Processing Addendum"]
+    attributes:
+      contract_type: data_processing
+
 relations:
   # manufacturing: 各 Bob 製品の製造元は IBM
   - {proposed_junction: manufacturing, from: "IBM Bob",                                                         to: "IBM"}
@@ -66,13 +85,22 @@ relations:
   - {proposed_junction: manufacturing, from: "Bob-Shell",                                                       to: "IBM"}
   - {proposed_junction: manufacturing, from: "Bob IDE",                                                         to: "IBM"}
 
+  # product_variant: 製品ファミリのバリアント (旧 "オファリング" weak 5 件を typed 化)
+  - {proposed_junction: product_variant, from: "IBM Bob", to: "IBM Bob Pro"}
+  - {proposed_junction: product_variant, from: "IBM Bob", to: "IBM Bob Pro Plus"}
+  - {proposed_junction: product_variant, from: "IBM Bob", to: "IBM Bob Ultra"}
+  - {proposed_junction: product_variant, from: "IBM Bob", to: "IBM Bob Enterprise"}
+  - {proposed_junction: product_variant, from: "IBM Bob", to: "IBM Bob 無料評価版"}
+
+  # governance: i127-9285 は Bob 本体 + 全バリアントを規定する
+  - {proposed_junction: governance, from: "IBM Bob",                to: "i127-9285"}
+  - {proposed_junction: governance, from: "IBM Bob Pro",            to: "i127-9285"}
+  - {proposed_junction: governance, from: "IBM Bob Pro Plus",       to: "i127-9285"}
+  - {proposed_junction: governance, from: "IBM Bob Ultra",          to: "i127-9285"}
+  - {proposed_junction: governance, from: "IBM Bob Enterprise",     to: "i127-9285"}
+  - {proposed_junction: governance, from: "IBM Bob 無料評価版",     to: "i127-9285"}
+
 weak_relations:
-  # オファリング階層 (将来の typed 化候補: product_hierarchy / offering_tier)
-  - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Pro"}
-  - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Pro Plus"}
-  - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Ultra"}
-  - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob Enterprise"}
-  - {subject: "IBM Bob", predicate: "オファリング", object: "IBM Bob 無料評価版"}
   # アドオン (将来の typed 化候補: product_addon)
   - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "アドオン対象", object: "IBM Bob Pro"}
   - {subject: "IBM Bob Premium Package for Java Modernization Individual", predicate: "アドオン対象", object: "IBM Bob Pro Plus"}

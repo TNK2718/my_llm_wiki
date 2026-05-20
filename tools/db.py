@@ -22,9 +22,12 @@ from normalize import normalize, similarity  # re-export for callers
 
 # ---------- 型定数 ----------
 EntityTable = Literal["person", "organization", "product", "project"]
-RelationTable = Literal["employment", "manufacturing", "org_hierarchy"]
+RelationTable = Literal[
+    "employment", "manufacturing", "org_hierarchy", "product_variant",
+    "governance", "compliance",
+]
 
-ENTITY_TABLES: tuple[str, ...] = ("person", "organization", "product", "project")
+ENTITY_TABLES: tuple[str, ...] = ("person", "organization", "product", "project", "contract")
 
 # canonical 列のうち claims で扱う列名（識別キー列は除外）
 ENTITY_CLAIM_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -32,13 +35,20 @@ ENTITY_CLAIM_COLUMNS: dict[str, tuple[str, ...]] = {
     "organization": ("canonical_name", "org_type", "founded_year", "headquarters"),
     "product":      ("canonical_name", "release_date", "category"),
     "project":      ("canonical_name", "started_at", "ended_at"),
+    "contract":     ("canonical_name", "contract_type", "effective_date", "valid_until",
+                     "jurisdiction", "url", "version",
+                     "sla_uptime_percent", "sla_response_time_minutes",
+                     "rto_hours", "rpo_hours"),
 }
 
 # junction の属性 claim 列（identification key は含めない）
 RELATION_CLAIM_COLUMNS: dict[str, tuple[str, ...]] = {
-    "employment":    ("role", "end_date"),
-    "manufacturing": (),
-    "org_hierarchy": (),
+    "employment":      ("role", "end_date"),
+    "manufacturing":   (),
+    "org_hierarchy":   (),
+    "product_variant": (),
+    "governance":      (),
+    "compliance":      (),
 }
 
 # canonical 列名 → conflict_kinds.kind
@@ -599,6 +609,89 @@ def find_or_create_org_hierarchy(
         "INSERT INTO org_hierarchy(parent_org_id, child_org_id, document_id, "
         "evidence, confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
         (parent_org_id, child_org_id, document_id, evidence, confidence, now, now),
+    )
+    return cur.lastrowid, "new", None
+
+
+def find_or_create_governance(
+    db: sqlite3.Connection,
+    product_id: int,
+    contract_id: int,
+    document_id: int,
+    *,
+    evidence: Optional[str] = None,
+    confidence: float = 0.5,
+) -> tuple[int, str, Optional[int]]:
+    """UNIQUE(product_id, contract_id)。多対多なので cardinality_violation は起きない。"""
+    row = db.execute(
+        "SELECT id FROM governance WHERE product_id=? AND contract_id=?",
+        (product_id, contract_id),
+    ).fetchone()
+    if row:
+        return row["id"], "existing", None
+    now = _now()
+    cur = db.execute(
+        "INSERT INTO governance(product_id, contract_id, document_id, "
+        "evidence, confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        (product_id, contract_id, document_id, evidence, confidence, now, now),
+    )
+    return cur.lastrowid, "new", None
+
+
+def find_or_create_compliance(
+    db: sqlite3.Connection,
+    contract_id: int,
+    standard_name: str,
+    document_id: int,
+    *,
+    certified_until: Optional[str] = None,
+    evidence: Optional[str] = None,
+    confidence: float = 0.5,
+) -> tuple[int, str, Optional[int]]:
+    """UNIQUE(contract_id, standard_name)。多対多なので cardinality_violation は起きない。"""
+    row = db.execute(
+        "SELECT id FROM compliance WHERE contract_id=? AND standard_name=?",
+        (contract_id, standard_name),
+    ).fetchone()
+    if row:
+        return row["id"], "existing", None
+    now = _now()
+    cur = db.execute(
+        "INSERT INTO compliance(contract_id, standard_name, certified_until, document_id, "
+        "evidence, confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+        (contract_id, standard_name, certified_until, document_id, evidence, confidence, now, now),
+    )
+    return cur.lastrowid, "new", None
+
+
+def find_or_create_product_variant(
+    db: sqlite3.Connection,
+    parent_product_id: int,
+    variant_product_id: int,
+    document_id: int,
+    *,
+    evidence: Optional[str] = None,
+    confidence: float = 0.5,
+) -> tuple[int, str, Optional[int]]:
+    """UNIQUE(variant_product_id)。違反主張は staging へエスカレーション。
+
+    parent と variant が同じ product だった場合は循環なので weak へ落とすのが正解だが、
+    DB レベルでは UNIQUE 違反にもならない無害な自己参照。呼び出し元 (ingest._resolve_relation)
+    で弾く。
+    """
+    row = db.execute(
+        "SELECT id, parent_product_id FROM product_variant WHERE variant_product_id=?",
+        (variant_product_id,),
+    ).fetchone()
+    if row:
+        if row["parent_product_id"] == parent_product_id:
+            return row["id"], "existing", None
+        return row["id"], "cardinality_violation", row["id"]
+    now = _now()
+    cur = db.execute(
+        "INSERT INTO product_variant(parent_product_id, variant_product_id, document_id, "
+        "evidence, confidence, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+        (parent_product_id, variant_product_id, document_id, evidence, confidence, now, now),
     )
     return cur.lastrowid, "new", None
 

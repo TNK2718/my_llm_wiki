@@ -126,10 +126,25 @@ def build_fixture(extract_gold_path: Path | str, out_sqlite: Path | str) -> Path
                 f_name = r.get("from")
                 t_name = r.get("to")
                 src = name_to_table_id.get(f_name)
+                attrs = r.get("attributes") or {}
+                # compliance: to は standard 名 (テキスト)。dst は entity ではないので別経路
+                if junction == "compliance":
+                    if src is None or src[0] != "contract":
+                        continue
+                    standard = (t_name or "").strip()
+                    if not standard:
+                        continue
+                    cid, _, _ = kg.find_or_create_compliance(
+                        conn, src[1], standard, doc_id,
+                        certified_until=attrs.get("certified_until"),
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "compliance", cid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+                    continue
                 dst = name_to_table_id.get(t_name)
                 if src is None or dst is None:
                     continue
-                attrs = r.get("attributes") or {}
                 if junction == "employment":
                     person_id = src[1] if src[0] == "person" else dst[1]
                     org_id = dst[1] if dst[0] == "organization" else src[1]
@@ -162,6 +177,24 @@ def build_fixture(extract_gold_path: Path | str, out_sqlite: Path | str) -> Path
                         evidence=f"gold:{slug}", confidence=0.9,
                     )
                     kg.record_existence_claim(conn, "org_hierarchy", oid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+                elif junction == "product_variant":
+                    parent_id = src[1]
+                    variant_id = dst[1]
+                    pvid, _, _ = kg.find_or_create_product_variant(
+                        conn, parent_id, variant_id, doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "product_variant", pvid, doc_id,
+                                              evidence=f"gold:{slug}", confidence=0.9)
+                elif junction == "governance":
+                    product_id = src[1] if src[0] == "product" else dst[1]
+                    contract_id = dst[1] if dst[0] == "contract" else src[1]
+                    gid, _, _ = kg.find_or_create_governance(
+                        conn, product_id, contract_id, doc_id,
+                        evidence=f"gold:{slug}", confidence=0.9,
+                    )
+                    kg.record_existence_claim(conn, "governance", gid, doc_id,
                                               evidence=f"gold:{slug}", confidence=0.9)
             # weak_relations
             for w in gold.get("weak_relations") or []:

@@ -12,8 +12,11 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 import config
 
 
-EntityType = Literal["person", "organization", "product", "project"]
-RelationJunction = Literal["employment", "manufacturing", "org_hierarchy"]
+EntityType = Literal["person", "organization", "product", "project", "contract"]
+RelationJunction = Literal[
+    "employment", "manufacturing", "org_hierarchy", "product_variant",
+    "governance", "compliance",
+]
 
 
 class ColumnSpec(BaseModel):

@@ -294,9 +294,13 @@ def _resolve_entity(
 
 
 _JUNCTION_FROM_TYPE = {
-    "employment": ("person", "organization"),
-    "manufacturing": ("product", "organization"),
-    "org_hierarchy": ("organization", "organization"),
+    "employment":      ("person", "organization"),
+    "manufacturing":   ("product", "organization"),
+    "org_hierarchy":   ("organization", "organization"),
+    "product_variant": ("product", "product"),
+    "governance":      ("product", "contract"),
+    # compliance は (contract, standard_name) で 2nd エンドポイントが entity でないので
+    # _JUNCTION_FROM_TYPE には載せず、_resolve_relation で個別ハンドルする
 }
 
 
@@ -334,6 +338,28 @@ def _resolve_relation(
             confidence=min(r.confidence, 0.3),
         )
         counters["weak_unknown_junction"] = counters.get("weak_unknown_junction", 0) + 1
+        return
+
+    # compliance は (contract, standard_name TEXT) で右辺が entity ではない特例
+    if junction == "compliance":
+        contract_src = _find_resolved(name_to_id, "contract", r.from_)
+        if contract_src is None or contract_src[0] != "contract":
+            counters["compliance_unresolved_contract"] = counters.get("compliance_unresolved_contract", 0) + 1
+            return
+        standard = (r.to or "").strip()
+        if not standard:
+            return
+        cert_until = (r.attributes or {}).get("certified_until")
+        cid, how, _ = kg.find_or_create_compliance(
+            db, contract_src[1], standard, doc_id,
+            certified_until=cert_until,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"compliance_{how}"] = counters.get(f"compliance_{how}", 0) + 1
+        kg.record_existence_claim(
+            db, "compliance", cid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
         return
 
     expected_from, expected_to = _JUNCTION_FROM_TYPE[junction]
@@ -415,6 +441,66 @@ def _resolve_relation(
             return
         kg.record_existence_claim(
             db, "manufacturing", mid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+
+    elif junction == "governance":
+        # from = product, to = contract
+        product_id = src[1] if src[0] == "product" else dst[1]
+        contract_id = dst[1] if dst[0] == "contract" else src[1]
+        gid, how, _ = kg.find_or_create_governance(
+            db, product_id, contract_id, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"governance_{how}"] = counters.get(f"governance_{how}", 0) + 1
+        kg.record_existence_claim(
+            db, "governance", gid, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+
+    elif junction == "product_variant":
+        # from = parent product, to = variant product。自己参照は weak へ
+        parent_id = src[1]
+        variant_id = dst[1]
+        if parent_id == variant_id:
+            kg.add_weak_relation(
+                db,
+                subject_table="product", subject_id=parent_id,
+                predicate="self_variant",
+                object_table="product", object_id=variant_id,
+                document_id=doc_id, evidence=r.evidence,
+                confidence=min(r.confidence, 0.3),
+            )
+            counters["weak_self_variant"] = counters.get("weak_self_variant", 0) + 1
+            return
+        pvid, how, conflict_with = kg.find_or_create_product_variant(
+            db, parent_id, variant_id, doc_id,
+            evidence=r.evidence, confidence=r.confidence,
+        )
+        counters[f"product_variant_{how}"] = counters.get(f"product_variant_{how}", 0) + 1
+        if how == "cardinality_violation":
+            kg.add_staging_extraction(
+                db, doc_id,
+                raw_payload=json.dumps(
+                    {"kind": "cardinality_violation",
+                     "junction": "product_variant",
+                     "variant_product_id": variant_id,
+                     "proposed_parent_id": parent_id,
+                     "existing_product_variant_id": conflict_with}, ensure_ascii=False,
+                ),
+                proposed_table="product_variant",
+                match_summary=_build_match_summary(
+                    "cardinality_violation",
+                    extra={
+                        "rule": "UNIQUE(variant_product_id)",
+                        "junction": "product_variant",
+                        "existing_product_variant_id": conflict_with,
+                    },
+                ),
+            )
+            return
+        kg.record_existence_claim(
+            db, "product_variant", pvid, doc_id,
             evidence=r.evidence, confidence=r.confidence,
         )
 
