@@ -111,8 +111,58 @@ def _run_query(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_proposal(args: argparse.Namespace) -> int:
+    from tools.eval import proposal_eval
+
+    _set_runtime_config(args.temperature)
+    gold_path = Path(args.gold).resolve()
+    result = proposal_eval.evaluate(gold_path, runs=args.runs)
+    meta = eio.build_meta("proposal", gold_path, args.tag, args.runs, args.temperature)
+    out_dir = Path(args.out)
+    json_path, md_path = eio.report_paths(out_dir, meta)
+    eio.write_json(json_path, {"meta": meta.as_dict(), "result": result})
+    eio.write_markdown(
+        md_path,
+        meta,
+        proposal_eval.to_markdown_table(result),
+        proposal_eval.summary_text(result),
+        result["per_case"],
+    )
+    print(f"wrote: {json_path}")
+    print(f"wrote: {md_path}")
+    return 0
+
+
 def _run_all(args: argparse.Namespace) -> int:
-    raise SystemExit("`all` サブコマンドは Phase 4 で実装予定です")
+    """all stages: 単一 --gold は受け取らず、--gold-dir 配下を全 stage で評価する."""
+    gold_dir = Path(args.gold_dir).resolve()
+    if not gold_dir.is_dir():
+        raise SystemExit(f"--gold-dir が無い: {gold_dir}")
+
+    rc = 0
+    stages = (
+        ("extract", "extract", _run_extract),
+        ("dedup",   "dedup",   _run_dedup),
+        ("query",   "query",   _run_query),
+        ("proposal","schema_proposals", _run_proposal),
+    )
+    for stage, subdir, runner in stages:
+        for gold in sorted((gold_dir / subdir).glob("*.yml")):
+            sub_args = argparse.Namespace(
+                gold=str(gold),
+                runs=args.runs,
+                tag=args.tag,
+                temperature=args.temperature,
+                out=args.out,
+                no_adjudicate=getattr(args, "no_adjudicate", False),
+            )
+            print(f"--- {stage}: {gold.name} ---")
+            try:
+                rc |= runner(sub_args)
+            except SystemExit as e:
+                print(f"  skipped ({stage}/{gold.name}): {e}")
+                rc |= 1
+    return rc
 
 
 def main() -> None:
@@ -133,8 +183,16 @@ def main() -> None:
     _add_common_args(p_q)
     p_q.set_defaults(func=_run_query)
 
-    p_all = sub.add_parser("all", help="all stages (Phase 4)")
-    _add_common_args(p_all)
+    p_pr = sub.add_parser("proposal", help="schema_proposals / staging / weak_promotion (Phase 4)")
+    _add_common_args(p_pr)
+    p_pr.set_defaults(func=_run_proposal)
+
+    p_all = sub.add_parser("all", help="extract + dedup + query + proposal を一括")
+    p_all.add_argument("--gold-dir", default=str(config.ROOT / "data" / "eval" / "gold"))
+    p_all.add_argument("--runs", type=int, default=1)
+    p_all.add_argument("--tag", default="default")
+    p_all.add_argument("--temperature", type=float, default=None)
+    p_all.add_argument("--out", default=str(config.ROOT / "data" / "eval" / "runs"))
     p_all.set_defaults(func=_run_all)
 
     args = parser.parse_args()

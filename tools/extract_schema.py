@@ -37,6 +37,16 @@ class NewJunctionProposal(BaseModel):
     rationale: Optional[str] = None
 
 
+class ExistingMatchHint(BaseModel):
+    """LLM が「この entity は既存 <table> の <name> と紛らわしい」と提案する任意ヒント。
+
+    類似度スコアは持たない（pipeline 側で決定論的に算出する）。
+    """
+    table: str
+    name: str
+    rationale: Optional[str] = None
+
+
 class EntityExtraction(BaseModel):
     proposed_type: str  # starter or arbitrary (proposal kind)
     canonical_name: str
@@ -45,6 +55,7 @@ class EntityExtraction(BaseModel):
     confidence: float = 0.5
     evidence: Optional[str] = None
     new_table_proposal: Optional[NewTableProposal] = None
+    existing_matches: list[ExistingMatchHint] = Field(default_factory=list)
 
     @field_validator("confidence")
     @classmethod

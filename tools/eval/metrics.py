@@ -12,6 +12,11 @@ class PRF:
     fn: int
 
     @property
+    def is_empty(self) -> bool:
+        """採点対象なし (gold/pred 両方空)。precision/recall は数学的に未定義。"""
+        return self.tp + self.fp + self.fn == 0
+
+    @property
     def precision(self) -> float:
         d = self.tp + self.fp
         return self.tp / d if d else 0.0
@@ -27,6 +32,11 @@ class PRF:
         return (2 * p * r / (p + r)) if (p + r) else 0.0
 
     def as_dict(self) -> dict:
+        # 採点対象が無いときは precision/recall/f1 を None として返し、
+        # 「失敗 0 件 (=実装が正しい)」と「データ無し」を区別する。
+        if self.is_empty:
+            return {"tp": 0, "fp": 0, "fn": 0,
+                    "precision": None, "recall": None, "f1": None}
         return {
             "tp": self.tp,
             "fp": self.fp,

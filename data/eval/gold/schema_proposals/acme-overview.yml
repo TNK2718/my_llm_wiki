@@ -1,0 +1,22 @@
+# Phase 4 schema_proposals gold (docs/typed-schema-design.md「eval gold への影響」)。
+# starter (person/organization/product/project + employment/manufacturing/org_hierarchy)
+# だけで十分な doc。理想的な ingest なら proposal/staging はゼロ件、canonical は安定。
+schema_version: 1
+doc_slug: acme-overview
+source: data/eval/sources/acme-overview.md
+
+# 期待される schema_proposals (kind, target_table, ...)
+# acme は starter で完結するので空。proposal が出たら precision/recall が落ちる。
+expected_proposals: []
+
+# 期待される staging_extractions (reason, proposed_table, column 等)
+# 同上、ゼロ件期待。
+expected_staging: []
+
+# 期待される weak_relations 自動昇格 (predicate → junction 名)。
+# acme には「業務提携」「共同推進」が出てくるが N >= 5 に届かないので空。
+expected_weak_promotion: []
+
+# canonical_stability: 同 doc を runs 回 ingest しても canonical は flip しない
+canonical_stability:
+  max_flips_per_entity_column: 0

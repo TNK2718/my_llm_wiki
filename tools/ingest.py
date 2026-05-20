@@ -163,6 +163,30 @@ STARTER_ENTITY_TYPES = set(kg.ENTITY_TABLES)
 STARTER_JUNCTIONS = set(kg.RELATION_CLAIM_COLUMNS)
 
 
+def _llm_hints(e: EntityExtraction) -> list[dict]:
+    return [
+        {"table": h.table, "name": h.name, "rationale": h.rationale}
+        for h in (e.existing_matches or [])
+    ]
+
+
+def _build_match_summary(
+    reason: str,
+    *,
+    existing_matches: list[dict] | None = None,
+    llm_hints: list[dict] | None = None,
+    extra: dict | None = None,
+) -> str:
+    payload: dict = {"reason": reason}
+    if existing_matches:
+        payload["existing_matches"] = existing_matches
+    if llm_hints:
+        payload["llm_hints"] = llm_hints
+    if extra:
+        payload.update(extra)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _resolve_entity(
     db,
     e: EntityExtraction,
@@ -176,14 +200,17 @@ def _resolve_entity(
     if not e.canonical_name:
         return None
     if e.proposed_type not in STARTER_ENTITY_TYPES:
-        # 未知型 → staging + schema_proposal
+        # 未知型 → staging + schema_proposal。decisive 類似度は pipeline 側で算出
+        existing = kg.candidate_entities_across_tables(db, e.canonical_name)
         kg.add_staging_extraction(
             db, doc_id,
             raw_payload=e.model_dump_json(),
             proposed_table=e.proposed_type,
-            match_summary=json.dumps(
-                {"reason": "non_starter_type", "starter_types": list(STARTER_ENTITY_TYPES)},
-                ensure_ascii=False,
+            match_summary=_build_match_summary(
+                "non_starter_type",
+                existing_matches=existing,
+                llm_hints=_llm_hints(e),
+                extra={"starter_types": list(STARTER_ENTITY_TYPES)},
             ),
         )
         if e.new_table_proposal:
@@ -225,9 +252,9 @@ def _resolve_entity(
                      "confidence": e.confidence}, ensure_ascii=False,
                 ),
                 proposed_table=table,
-                match_summary=json.dumps(
-                    {"reason": "unknown_column", "known_columns": list(columns)},
-                    ensure_ascii=False,
+                match_summary=_build_match_summary(
+                    "unknown_column",
+                    extra={"known_columns": list(columns), "column_name": col_name},
                 ),
             )
             kg.add_schema_proposal(
@@ -245,6 +272,7 @@ def _resolve_entity(
             evidence=e.evidence, confidence=e.confidence,
         )
         if r.result == kg.RecordClaimResult.REJECTED_LOW_CONFIDENCE:
+            existing = kg.candidate_entities_by_similarity(db, table, e.canonical_name)
             kg.add_staging_extraction(
                 db, doc_id,
                 raw_payload=json.dumps(
@@ -253,7 +281,11 @@ def _resolve_entity(
                      "confidence": e.confidence}, ensure_ascii=False,
                 ),
                 proposed_table=table,
-                match_summary=json.dumps({"reason": "low_confidence"}, ensure_ascii=False),
+                match_summary=_build_match_summary(
+                    "low_confidence",
+                    existing_matches=existing,
+                    extra={"column_name": col_name, "confidence": e.confidence},
+                ),
             )
             counters["staged_lowconf_attr"] = counters.get("staged_lowconf_attr", 0) + 1
         else:
@@ -310,6 +342,22 @@ def _resolve_relation(
     if src is None or dst is None:
         counters["rel_unresolved_endpoint"] = counters.get("rel_unresolved_endpoint", 0) + 1
         return
+    # 期待型に endpoints が解決されているか検査。LLM が誤型で結びつけた場合 (例 org_hierarchy
+    # の from に person を渡された) は FK 違反になるので weak へ逃がす
+    expected_pair = {expected_from, expected_to}
+    actual_pair = {src[0], dst[0]}
+    if actual_pair != expected_pair:
+        kg.add_weak_relation(
+            db,
+            subject_table=src[0], subject_id=src[1],
+            predicate=junction,
+            object_table=dst[0], object_id=dst[1],
+            document_id=doc_id,
+            evidence=r.evidence,
+            confidence=min(r.confidence, 0.3),
+        )
+        counters["weak_endpoint_type_mismatch"] = counters.get("weak_endpoint_type_mismatch", 0) + 1
+        return
 
     if junction == "employment":
         person_id = src[1] if src[0] == "person" else dst[1]
@@ -355,9 +403,13 @@ def _resolve_relation(
                      "confidence": r.confidence}, ensure_ascii=False,
                 ),
                 proposed_table="manufacturing",
-                match_summary=json.dumps(
-                    {"reason": "cardinality_violation",
-                     "rule": "UNIQUE(product_id)"}, ensure_ascii=False,
+                match_summary=_build_match_summary(
+                    "cardinality_violation",
+                    extra={
+                        "rule": "UNIQUE(product_id)",
+                        "junction": "manufacturing",
+                        "existing_manufacturing_id": conflict_with,
+                    },
                 ),
             )
             return
@@ -386,9 +438,13 @@ def _resolve_relation(
                      "existing_org_hierarchy_id": conflict_with}, ensure_ascii=False,
                 ),
                 proposed_table="org_hierarchy",
-                match_summary=json.dumps(
-                    {"reason": "cardinality_violation",
-                     "rule": "UNIQUE(child_org_id)"}, ensure_ascii=False,
+                match_summary=_build_match_summary(
+                    "cardinality_violation",
+                    extra={
+                        "rule": "UNIQUE(child_org_id)",
+                        "junction": "org_hierarchy",
+                        "existing_org_hierarchy_id": conflict_with,
+                    },
                 ),
             )
             return

@@ -684,7 +684,24 @@ starter には含めない。Phase 5 で取り込む。Phase 1〜4 で claims/pr
 - `canonical_stability`: confidence-based UPDATE が同 entity に対して頻繁に flip しないこと（高 churn は δ 設定の問題を示唆）
 - `weak_relation_promotion_recall`: 後から typed 化された predicate を、`weak_relations` がきちんと捕捉できていた率
 
-ground truth の出し方は実装段階で詰める。最初は `data/eval/gold/schema_proposals/<doc>.yml` を新設し、各文書につき「期待される proposal kind + target_table + columns」と「期待される staging_extractions 行」をペアで保持する想定。Phase 4 でフォーマットを確定する。
+ground truth は `data/eval/gold/schema_proposals/<doc>.yml`（Phase 4 で確定済み）。1 doc に対し下記 4 セクションを保持する:
+
+```yaml
+schema_version: 1
+doc_slug: <slug>
+source: data/eval/sources/<slug>.md
+expected_proposals:
+  - {kind: new_table|new_column|rename, target_table: <table>, rationale_keywords: [...]}
+expected_staging:
+  - {reason: non_starter_type|unknown_column|low_confidence|cardinality_violation,
+     proposed_table: <table>, column: <optional>}
+expected_weak_promotion:
+  - {predicate: <text>, becomes_junction: <junction>}
+canonical_stability:
+  max_flips_per_entity_column: 0
+```
+
+評価は `python -m tools.eval proposal --gold <path>` で動く。詳細は `tools/eval/proposal_eval.py:compute_metrics` 参照。
 
 ---
 

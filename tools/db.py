@@ -197,6 +197,82 @@ def add_alias(db: sqlite3.Connection, table: str, entity_id: int, alias: str) ->
     )
 
 
+# ---------- 既存マッチ候補列挙（決定論的類似度） ----------
+def candidate_entities_by_similarity(
+    db: sqlite3.Connection,
+    table: str,
+    name: str,
+    *,
+    top_k: int = 5,
+    min_sim: float = 0.3,
+) -> list[dict]:
+    """設計柱 D1 の決定論的類似度算出。canonical_name と aliases を走査し、
+
+    1. norm_key 完全一致を similarity=1.0, norm_key_match=True で最優先
+    2. 続いて name の trigram Jaccard で similarity >= min_sim の上位 top_k 件
+
+    を返す。各 dict: {id, canonical_name, norm_key, similarity, norm_key_match}.
+    候補ゼロなら []。
+    """
+    if table not in ENTITY_TABLES:
+        raise ValueError(f"unknown entity table: {table}")
+    if not name:
+        return []
+    nk = normalize(name)
+    rows = db.execute(
+        f"SELECT id, canonical_name, norm_key FROM {table}"
+    ).fetchall()
+    if not rows:
+        return []
+
+    alias_idx: dict[int, list[str]] = {}
+    for ar in db.execute(
+        f"SELECT {table}_id AS id, norm_key FROM {table}_aliases"
+    ).fetchall():
+        alias_idx.setdefault(ar["id"], []).append(ar["norm_key"])
+
+    out: list[dict] = []
+    for r in rows:
+        norm_keys = [r["norm_key"]] + alias_idx.get(r["id"], [])
+        norm_match = any(k == nk for k in norm_keys if k)
+        sim = max((similarity(nk, k) for k in norm_keys if k), default=0.0)
+        if norm_match:
+            sim = 1.0
+        if not norm_match and sim < min_sim:
+            continue
+        out.append({
+            "id": r["id"],
+            "canonical_name": r["canonical_name"],
+            "norm_key": r["norm_key"],
+            "similarity": round(sim, 4),
+            "norm_key_match": norm_match,
+        })
+    out.sort(key=lambda d: (not d["norm_key_match"], -d["similarity"]))
+    return out[:top_k]
+
+
+def candidate_entities_across_tables(
+    db: sqlite3.Connection,
+    name: str,
+    *,
+    top_k_per_table: int = 3,
+    min_sim: float = 0.3,
+) -> list[dict]:
+    """starter 全 entity table を横断して候補を返す。
+
+    未知型 staging で「既存の似た entity がどの型に居るか」を提示するための関数。
+    各 dict: {table, id, canonical_name, similarity, norm_key_match}.
+    """
+    out: list[dict] = []
+    for tbl in ENTITY_TABLES:
+        for c in candidate_entities_by_similarity(
+            db, tbl, name, top_k=top_k_per_table, min_sim=min_sim
+        ):
+            out.append({"table": tbl, **c})
+    out.sort(key=lambda d: (not d["norm_key_match"], -d["similarity"]))
+    return out
+
+
 # ---------- canonical 反映ヘルパ ----------
 def _is_entity_table(table: str) -> bool:
     return table in ENTITY_TABLES

@@ -415,6 +415,30 @@ async function rejectProposal(id){
 }
 
 // ----- Staging review -----
+function renderMatchSummary(raw){
+  if(!raw) return '';
+  let m;
+  try{ m=JSON.parse(raw); }
+  catch(_){ return `<span style="color:var(--dim)">match: ${esc(raw)}</span>`; }
+  const parts=[];
+  parts.push(`<span class="badge">reason: ${esc(m.reason||'?')}</span>`);
+  if(m.rule) parts.push(`<span class="badge">rule: ${esc(m.rule)}</span>`);
+  if(m.column_name) parts.push(`<span class="badge">column: ${esc(m.column_name)}</span>`);
+  let body=`<div class="m">${parts.join(' ')}</div>`;
+  if(Array.isArray(m.existing_matches)&&m.existing_matches.length){
+    body+='<div class="m" style="color:var(--dim)">既存の似た entity:</div>';
+    body+=m.existing_matches.map(x=>{
+      const tag=x.norm_key_match?'norm_key 一致':`sim=${x.similarity}`;
+      const tbl=x.table?` (${esc(x.table)})`:'';
+      return `<div class="row"><b>${esc(x.canonical_name)}</b>${tbl}<span>${tag}</span></div>`;
+    }).join('');
+  }
+  if(Array.isArray(m.llm_hints)&&m.llm_hints.length){
+    body+='<div class="m" style="color:var(--dim)">LLM ヒント:</div>';
+    body+=m.llm_hints.map(x=>`<div class="row"><b>${esc(x.name)}</b> (${esc(x.table||'?')})<span>${esc(x.rationale||'')}</span></div>`).join('');
+  }
+  return body;
+}
 async function loadStaging(){
   const rows=await api('/api/staging');
   if(!rows.length){$('#slist').innerHTML='<div class="empty">pending な staging はありません</div>';return;}
@@ -422,7 +446,7 @@ async function loadStaging(){
     <div class="cfg">
       <div class="h">#${s.id} · ${s.proposed_table||'—'} · ${s.doc_slug}</div>
       <div class="m"><pre class="sql" style="margin:0;flex:1">${esc(s.raw_payload)}</pre></div>
-      <div class="m"><span style="color:var(--dim)">match: ${esc(s.match_summary||'')}</span></div>
+      ${renderMatchSummary(s.match_summary)}
       <div class="m">
         <button onclick="decideStaging(${s.id})">Assign</button>
         <button class="ghost" onclick="rejectStaging(${s.id})">Reject</button>

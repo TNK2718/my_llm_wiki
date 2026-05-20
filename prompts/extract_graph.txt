@@ -14,7 +14,8 @@ starter 関係: employment / manufacturing / org_hierarchy
       "attributes": { "birth_date": "1990-01-01", "nationality": "日本" },
       "confidence": 0.0,
       "evidence": "根拠となる原文の短い引用",
-      "new_table_proposal": null
+      "new_table_proposal": null,
+      "existing_matches": []
     }
   ],
   "relations": [
@@ -58,6 +59,7 @@ starter 型・関係の意味:
 - attributes の値は **必ず資料に明記された情報**。推測しない。
 - 同じ entity を複数 chunk から検出した場合は同じ canonical_name を使う。
 - confidence: 1.0 は使わない（人手 verdict 専用）。LLM 抽出は 0.0〜0.95 の範囲で。
+- 既存テーブルに紛らわしいエンティティがありそうなら `existing_matches` に候補を任意で書いてよい (例: `[{"table":"organization","name":"Acme Corp","rationale":"略称が一致"}]`)。**類似度スコアは出さないこと**（pipeline 側で決定論的に算出する）。確信がないときは空配列で構わない。
 
 例 1) 「アクメ株式会社の設立年は 2015 年、本社は東京都港区にあり、CEO は山田太郎である。」
 {
