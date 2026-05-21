@@ -1,15 +1,14 @@
-"""LLM extract 出力の検証と confidence cap。
+"""LLM extract 出力の検証。
 
-docs/typed-schema-design.md §5「LLM-extracted claim の confidence は extractor で
-min(raw_extracted_conf, LLM_CONFIDENCE_CAP) に cap」を実装する。
+confidence は LLM 側からは出力させず、`extract_confidence.apply_logprob_confidence`
+が抽出後に token logprob 由来の値で上書きする。フィールドは残してあるが default
+0.0 で、上書きされなかった場合は LOW_CONFIDENCE_THRESHOLD で自然に staging に落ちる。
 """
 from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
-
-import config
+from pydantic import BaseModel, Field, ValidationError
 
 
 EntityType = Literal["person", "organization", "product", "project", "contract"]
@@ -55,17 +54,10 @@ class EntityExtraction(BaseModel):
     canonical_name: str
     mention_surface: Optional[str] = None
     attributes: dict[str, Any] = Field(default_factory=dict)
-    confidence: float = 0.5
+    confidence: float = 0.0  # logprob 由来値で上書きされる前提
     evidence: Optional[str] = None
     new_table_proposal: Optional[NewTableProposal] = None
     existing_matches: list[ExistingMatchHint] = Field(default_factory=list)
-
-    @field_validator("confidence")
-    @classmethod
-    def _cap_confidence(cls, v: float) -> float:
-        if not isinstance(v, (int, float)):
-            return 0.5
-        return min(max(float(v), 0.0), config.LLM_CONFIDENCE_CAP)
 
 
 class RelationExtraction(BaseModel):
@@ -74,17 +66,10 @@ class RelationExtraction(BaseModel):
     to: str
     attributes: dict[str, Any] = Field(default_factory=dict)
     evidence: Optional[str] = None
-    confidence: float = 0.5
+    confidence: float = 0.0
     new_junction_proposal: Optional[NewJunctionProposal] = None
 
     model_config = {"populate_by_name": True}
-
-    @field_validator("confidence")
-    @classmethod
-    def _cap_confidence(cls, v: float) -> float:
-        if not isinstance(v, (int, float)):
-            return 0.5
-        return min(max(float(v), 0.0), config.LLM_CONFIDENCE_CAP)
 
 
 class WeakRelationExtraction(BaseModel):
@@ -92,14 +77,7 @@ class WeakRelationExtraction(BaseModel):
     predicate: str
     object: str  # entity name または scalar
     evidence: Optional[str] = None
-    confidence: float = 0.3
-
-    @field_validator("confidence")
-    @classmethod
-    def _cap_confidence(cls, v: float) -> float:
-        if not isinstance(v, (int, float)):
-            return 0.3
-        return min(max(float(v), 0.0), config.LLM_CONFIDENCE_CAP)
+    confidence: float = 0.0
 
 
 class GraphExtraction(BaseModel):

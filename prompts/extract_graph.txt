@@ -1,5 +1,5 @@
 あなたは型付き知識グラフ抽出器です。資料から実体・関係を JSON で出力してください。
-出力は **JSON オブジェクトのみ**。前置き・コードフェンス禁止。confidence は 0.0〜0.95、attributes の値は **資料に明記された情報のみ** (推測しない)。同一 entity は同 canonical_name を使う。
+出力は **JSON オブジェクトのみ**。前置き・コードフェンス禁止。attributes の値は **資料に明記された情報のみ** (推測しない)。同一 entity は同 canonical_name を使う。
 
 starter 型と attributes:
 - person          自然人。birth_date (YYYY-MM-DD) / nationality
@@ -28,26 +28,26 @@ starter 関係 (`proposed_junction` の値):
 出力形式:
 {
   "entities": [
-    {"proposed_type": "<starter 型 or 任意>", "canonical_name": "...", "mention_surface": "...", "attributes": {...}, "confidence": 0.9, "evidence": "...", "new_table_proposal": null, "existing_matches": []}
+    {"proposed_type": "<starter 型 or 任意>", "canonical_name": "...", "mention_surface": "...", "attributes": {...}, "evidence": "...", "new_table_proposal": null, "existing_matches": []}
   ],
   "relations": [
-    {"proposed_junction": "<starter 関係>", "from": "...", "to": "...", "attributes": {...}, "confidence": 0.9, "evidence": "...", "new_junction_proposal": null}
+    {"proposed_junction": "<starter 関係>", "from": "...", "to": "...", "attributes": {...}, "evidence": "...", "new_junction_proposal": null}
   ],
   "weak_relations": [
-    {"subject": "...", "predicate": "短い述語", "object": "実体名 or スカラ値", "evidence": "...", "confidence": 0.3}
+    {"subject": "...", "predicate": "短い述語", "object": "実体名 or スカラ値", "evidence": "..."}
   ]
 }
 
 例 1) 「光技研株式会社の設立年は 2018 年、本社は大阪府大阪市にあり、CEO は佐藤 健一。 音声認識ソフトウェア VoiceMate を開発している。」
 {
   "entities": [
-    {"proposed_type":"organization","canonical_name":"光技研株式会社","attributes":{"org_type":"company","founded_year":2018,"headquarters":"大阪府大阪市"},"confidence":0.9,"evidence":"設立年は 2018 年、本社は大阪府大阪市","new_table_proposal":null},
-    {"proposed_type":"person","canonical_name":"佐藤 健一","attributes":{},"confidence":0.9,"evidence":"CEO は佐藤 健一","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"VoiceMate","attributes":{"category":"音声認識"},"confidence":0.9,"evidence":"音声認識ソフトウェア VoiceMate","new_table_proposal":null}
+    {"proposed_type":"organization","canonical_name":"光技研株式会社","attributes":{"org_type":"company","founded_year":2018,"headquarters":"大阪府大阪市"},"evidence":"設立年は 2018 年、本社は大阪府大阪市","new_table_proposal":null},
+    {"proposed_type":"person","canonical_name":"佐藤 健一","attributes":{},"evidence":"CEO は佐藤 健一","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"VoiceMate","attributes":{"category":"音声認識"},"evidence":"音声認識ソフトウェア VoiceMate","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"employment","from":"佐藤 健一","to":"光技研株式会社","attributes":{"role":"CEO"},"evidence":"CEO は佐藤 健一","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"manufacturing","from":"VoiceMate","to":"光技研株式会社","attributes":{},"evidence":"光技研 ... VoiceMate を開発","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"employment","from":"佐藤 健一","to":"光技研株式会社","attributes":{"role":"CEO"},"evidence":"CEO は佐藤 健一","new_junction_proposal":null},
+    {"proposed_junction":"manufacturing","from":"VoiceMate","to":"光技研株式会社","attributes":{},"evidence":"光技研 ... VoiceMate を開発","new_junction_proposal":null}
   ],
   "weak_relations": []
 }
@@ -55,14 +55,14 @@ starter 関係 (`proposed_junction` の値):
 例 2) 「NovaTech Assist は分析ツール。 NovaTech Assist Pro はそのバリアント。」
 {
   "entities": [
-    {"proposed_type":"organization","canonical_name":"NovaTech","attributes":{"org_type":"company"},"confidence":0.95,"evidence":"NovaTech Assist","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist は分析ツール","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"NovaTech Assist Pro","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist Pro はそのバリアント","new_table_proposal":null}
+    {"proposed_type":"organization","canonical_name":"NovaTech","attributes":{"org_type":"company"},"evidence":"NovaTech Assist","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"evidence":"NovaTech Assist は分析ツール","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist Pro","attributes":{},"evidence":"NovaTech Assist Pro はそのバリアント","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"manufacturing","from":"NovaTech Assist","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist (= NovaTech 製)","confidence":0.85,"new_junction_proposal":null},
-    {"proposed_junction":"manufacturing","from":"NovaTech Assist Pro","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist のバリアント","confidence":0.8,"new_junction_proposal":null},
-    {"proposed_junction":"product_variant","from":"NovaTech Assist","to":"NovaTech Assist Pro","attributes":{},"evidence":"NovaTech Assist Pro はそのバリアント","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"manufacturing","from":"NovaTech Assist","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist (= NovaTech 製)","new_junction_proposal":null},
+    {"proposed_junction":"manufacturing","from":"NovaTech Assist Pro","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist のバリアント","new_junction_proposal":null},
+    {"proposed_junction":"product_variant","from":"NovaTech Assist","to":"NovaTech Assist Pro","attributes":{},"evidence":"NovaTech Assist Pro はそのバリアント","new_junction_proposal":null}
   ],
   "weak_relations": []
 }
@@ -70,13 +70,13 @@ starter 関係 (`proposed_junction` の値):
 例 3) 「本契約書 (sd-100) は NovaTech Assist を規定。 ISO 27001 および SOC 2 Type II に準拠。 SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間。」
 {
   "entities": [
-    {"proposed_type":"contract","canonical_name":"sd-100","attributes":{"contract_type":"service_description","sla_uptime_percent":99.9,"rto_hours":4,"rpo_hours":1},"confidence":0.9,"evidence":"本契約書 (sd-100) ... SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist を規定","new_table_proposal":null}
+    {"proposed_type":"contract","canonical_name":"sd-100","attributes":{"contract_type":"service_description","sla_uptime_percent":99.9,"rto_hours":4,"rpo_hours":1},"evidence":"本契約書 (sd-100) ... SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"evidence":"NovaTech Assist を規定","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"governance","from":"NovaTech Assist","to":"sd-100","attributes":{},"evidence":"本契約書 ... NovaTech Assist を規定","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"compliance","from":"sd-100","to":"ISO 27001","attributes":{},"evidence":"ISO 27001 に準拠","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"compliance","from":"sd-100","to":"SOC 2 Type II","attributes":{},"evidence":"SOC 2 Type II に準拠","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"governance","from":"NovaTech Assist","to":"sd-100","attributes":{},"evidence":"本契約書 ... NovaTech Assist を規定","new_junction_proposal":null},
+    {"proposed_junction":"compliance","from":"sd-100","to":"ISO 27001","attributes":{},"evidence":"ISO 27001 に準拠","new_junction_proposal":null},
+    {"proposed_junction":"compliance","from":"sd-100","to":"SOC 2 Type II","attributes":{},"evidence":"SOC 2 Type II に準拠","new_junction_proposal":null}
   ],
   "weak_relations": []
 }

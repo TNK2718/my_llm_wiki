@@ -135,12 +135,16 @@ def extract_graph_from_chunks(
     chunks: list[str], source_body: str | None = None,
 ) -> GraphExtraction:
     from extract_postprocess import ground_and_dedup
+    from extract_confidence import apply_logprob_confidence
 
     tmpl = load_prompt("extract_graph.txt")
     body = source_body if source_body is not None else "\n\n".join(chunks)
     if len(chunks) == 1:
         prompt = tmpl.replace("{KNOWN_ENTITIES}", "").replace("{CONTENT}", chunks[0])
-        return ground_and_dedup(parse_extraction(llm.ask_json(prompt)), body)
+        parsed, content_text, lp = llm.ask_json_with_logprobs(prompt)
+        g = parse_extraction(parsed)
+        g = apply_logprob_confidence(g, content_text, lp)
+        return ground_and_dedup(g, body)
 
     merged = GraphExtraction()
     seen_names: set[str] = set()
@@ -149,7 +153,8 @@ def extract_graph_from_chunks(
         prompt = tmpl.replace(
             "{KNOWN_ENTITIES}", _format_known_entities(seen_summary)
         ).replace("{CONTENT}", c)
-        part = parse_extraction(llm.ask_json(prompt))
+        parsed, content_text, lp = llm.ask_json_with_logprobs(prompt)
+        part = apply_logprob_confidence(parse_extraction(parsed), content_text, lp)
         for e in part.entities:
             if e.canonical_name and e.canonical_name not in seen_names:
                 seen_summary.append({

@@ -3,7 +3,7 @@
 - canonical 表は「最高 confidence active claim」のマテリアライズドビュー
 - claims/existence_claims は全主張ログ + 矛盾管理
 - 書き込みは BEGIN IMMEDIATE で serialize
-- LLM 抽出 conf は呼び出し元で cap (LLM_CONFIDENCE_CAP)
+- LLM 抽出 conf は呼び出し元 (extract_confidence) が token logprob 由来値で渡す
 - 低 conf は 'rejected_low_confidence' を返し、呼び出し元が staging/weak へ振り分け
 """
 from __future__ import annotations
@@ -330,7 +330,7 @@ def record_claim(
 ) -> ClaimDispatch:
     """entity 属性 claim を記録し §3 状態遷移を適用。
 
-    呼び出し元 (ingest) は confidence を min(raw, LLM_CONFIDENCE_CAP) で cap してから渡す。
+    呼び出し元 (ingest) は logprob 由来 confidence (extract_confidence で算出) を渡す。
     人手 verdict は document_id=HUMAN_DOCUMENT_ID, confidence=1.0 で渡す。
     """
     if table not in ENTITY_CLAIM_COLUMNS:

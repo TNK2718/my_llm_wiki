@@ -5,9 +5,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # --- Ollama ---
 OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"  # native chat (logprobs 対応・thinking 分離)
 MODEL = "gemma4:e2b"           # エッジ向け 2.3B 実効パラメータ。VRAM 少なめでも動く。
 NUM_CTX = 8192                 # モデルのコンテキスト長に合わせる
 TEMPERATURE = 0.2              # 保守係なので低め
+EXTRACT_TOP_LOGPROBS = 1       # ask_json_with_logprobs の top_logprobs パラメータ
+TRACE_LOGPROBS = False         # True にすると trace に raw logprob_tokens を残す (debug 用)
 
 # --- パス ---
 RAW_SOURCES = ROOT / "raw" / "sources"
@@ -40,8 +43,6 @@ DEDUP_SIM_THRESHOLD = 0.55
 CLAIM_CONFIDENCE_DELTA = 0.1
 # conf < この値の claim は staging / weak_relations に振り分ける
 LOW_CONFIDENCE_THRESHOLD = 0.3
-# LLM 抽出 conf の上限。人手 verdict (1.0) が doc 主張に silent 降格されないよう cap
-LLM_CONFIDENCE_CAP = 0.95
 # bootstrap で seed する __human__ document の id
 HUMAN_DOCUMENT_ID = 1
 # 同一 predicate が weak_relations に N 件超 蓄積したら schema_proposal を自動起票
