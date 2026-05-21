@@ -4,9 +4,9 @@
 starter 型と attributes:
 - person          自然人。birth_date (YYYY-MM-DD) / nationality
 - organization    会社・組織・大学・政府の **固有名詞のみ**。org_type ∈ {company,lab,team,university,government,nonprofit,other} / founded_year / headquarters
-- product         商品・サービスの **固有名詞のみ**。release_date / category / billing_period ∈ {monthly,annual,one_time} / included_quota_units (数値) / quota_unit_name (例: 'Bobcoin') / trial_period_days (整数)
+- product         商品・サービスの **固有名詞のみ**。release_date / category / billing_period ∈ {monthly,annual,one_time} / included_quota_units (数値) / quota_unit_name (例: 'Credit') / trial_period_days (整数)
 - project         プロジェクト・施策。started_at / ended_at
-- contract        サービス記述書・利用規約・SLA・セキュリティ補遺・DPA 等の法的/契約文書。contract_type ∈ {service_description,terms_of_service,sla,security_addendum,data_processing,other} / effective_date / valid_until / jurisdiction / url / version / sla_uptime_percent (例: 99.9) / sla_response_time_minutes / rto_hours / rpo_hours
+- contract        サービス記述書・利用規約・SLA・セキュリティ補遺・データ処理契約 等の法的/契約文書。contract_type ∈ {service_description,terms_of_service,sla,security_addendum,data_processing,other} / effective_date / valid_until / jurisdiction / url / version / sla_uptime_percent (例: 99.9) / sla_response_time_minutes / rto_hours / rpo_hours
 
 starter 関係 (`proposed_junction` の値):
 - employment       from=person, to=organization。attributes: role / start_date / end_date
@@ -20,7 +20,7 @@ starter 関係 (`proposed_junction` の値):
 "SaaS 製品" "AI SDLC ツール" "クラウド・サービス" "ソフトウェア" "許可ユーザー" "管理者" "オファリング" "プラン" "ライセンス" 等。
 
 **関係抽出のコツ:**
-- 製品名が組織名で始まる ("IBM Bob" 等) → 明示なしでも manufacturing(product, org) を出す
+- 製品名が組織名で始まる (例:「OrgName ProductName」) → 明示なしでも manufacturing(product, org) を出す
 - 製品ファミリ → 各バリアントごとに manufacturing(子, 親 org) + product_variant(親 product, 子 product) の 2 行
 - starter に当てはまらない関係 (mentions / similar_to / part_of / アドオン対象 等) は weak_relations に積む
 - starter にない型 (algorithm, standard, …) は entities に `new_table_proposal` を埋めて出す
@@ -38,45 +38,45 @@ starter 関係 (`proposed_junction` の値):
   ]
 }
 
-例 1) 「アクメ株式会社の設立年は 2015 年、本社は東京都港区にあり、CEO は山田太郎。 異常検知ソフトウェア SmartScan を開発している。」
+例 1) 「光技研株式会社の設立年は 2018 年、本社は大阪府大阪市にあり、CEO は佐藤 健一。 音声認識ソフトウェア VoiceMate を開発している。」
 {
   "entities": [
-    {"proposed_type":"organization","canonical_name":"アクメ株式会社","attributes":{"org_type":"company","founded_year":2015,"headquarters":"東京都港区"},"confidence":0.9,"evidence":"設立年は 2015 年、本社は東京都港区","new_table_proposal":null},
-    {"proposed_type":"person","canonical_name":"山田太郎","attributes":{},"confidence":0.9,"evidence":"CEO は山田太郎","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"SmartScan","attributes":{"category":"異常検知"},"confidence":0.9,"evidence":"異常検知ソフトウェア SmartScan","new_table_proposal":null}
+    {"proposed_type":"organization","canonical_name":"光技研株式会社","attributes":{"org_type":"company","founded_year":2018,"headquarters":"大阪府大阪市"},"confidence":0.9,"evidence":"設立年は 2018 年、本社は大阪府大阪市","new_table_proposal":null},
+    {"proposed_type":"person","canonical_name":"佐藤 健一","attributes":{},"confidence":0.9,"evidence":"CEO は佐藤 健一","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"VoiceMate","attributes":{"category":"音声認識"},"confidence":0.9,"evidence":"音声認識ソフトウェア VoiceMate","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"employment","from":"山田太郎","to":"アクメ株式会社","attributes":{"role":"CEO"},"evidence":"CEO は山田太郎","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"manufacturing","from":"SmartScan","to":"アクメ株式会社","attributes":{},"evidence":"アクメ ... SmartScan を開発","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"employment","from":"佐藤 健一","to":"光技研株式会社","attributes":{"role":"CEO"},"evidence":"CEO は佐藤 健一","confidence":0.9,"new_junction_proposal":null},
+    {"proposed_junction":"manufacturing","from":"VoiceMate","to":"光技研株式会社","attributes":{},"evidence":"光技研 ... VoiceMate を開発","confidence":0.9,"new_junction_proposal":null}
   ],
   "weak_relations": []
 }
 
-例 2) 「IBM Bob は AI SDLC ツール。 IBM Bob Pro はそのバリアント。」
+例 2) 「NovaTech Assist は分析ツール。 NovaTech Assist Pro はそのバリアント。」
 {
   "entities": [
-    {"proposed_type":"organization","canonical_name":"IBM","attributes":{"org_type":"company"},"confidence":0.95,"evidence":"IBM Bob","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"IBM Bob","attributes":{},"confidence":0.9,"evidence":"IBM Bob は AI SDLC ツール","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"IBM Bob Pro","attributes":{},"confidence":0.9,"evidence":"IBM Bob Pro はそのバリアント","new_table_proposal":null}
+    {"proposed_type":"organization","canonical_name":"NovaTech","attributes":{"org_type":"company"},"confidence":0.95,"evidence":"NovaTech Assist","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist は分析ツール","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist Pro","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist Pro はそのバリアント","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"manufacturing","from":"IBM Bob","to":"IBM","attributes":{},"evidence":"IBM Bob (= IBM 製)","confidence":0.85,"new_junction_proposal":null},
-    {"proposed_junction":"manufacturing","from":"IBM Bob Pro","to":"IBM","attributes":{},"evidence":"IBM Bob のバリアント","confidence":0.8,"new_junction_proposal":null},
-    {"proposed_junction":"product_variant","from":"IBM Bob","to":"IBM Bob Pro","attributes":{},"evidence":"IBM Bob Pro はそのバリアント","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"manufacturing","from":"NovaTech Assist","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist (= NovaTech 製)","confidence":0.85,"new_junction_proposal":null},
+    {"proposed_junction":"manufacturing","from":"NovaTech Assist Pro","to":"NovaTech","attributes":{},"evidence":"NovaTech Assist のバリアント","confidence":0.8,"new_junction_proposal":null},
+    {"proposed_junction":"product_variant","from":"NovaTech Assist","to":"NovaTech Assist Pro","attributes":{},"evidence":"NovaTech Assist Pro はそのバリアント","confidence":0.9,"new_junction_proposal":null}
   ],
   "weak_relations": []
 }
 
-例 3) 「本サービス記述書 (i127-9285) は IBM Bob を規定。 ISO 27001 および SOC 2 Type II に準拠。 SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間。」
+例 3) 「本契約書 (sd-100) は NovaTech Assist を規定。 ISO 27001 および SOC 2 Type II に準拠。 SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間。」
 {
   "entities": [
-    {"proposed_type":"contract","canonical_name":"i127-9285","attributes":{"contract_type":"service_description","sla_uptime_percent":99.9,"rto_hours":4,"rpo_hours":1},"confidence":0.9,"evidence":"本サービス記述書 (i127-9285) ... SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間","new_table_proposal":null},
-    {"proposed_type":"product","canonical_name":"IBM Bob","attributes":{},"confidence":0.9,"evidence":"IBM Bob を規定","new_table_proposal":null}
+    {"proposed_type":"contract","canonical_name":"sd-100","attributes":{"contract_type":"service_description","sla_uptime_percent":99.9,"rto_hours":4,"rpo_hours":1},"confidence":0.9,"evidence":"本契約書 (sd-100) ... SLA 稼働率 99.9%、RTO 4 時間、RPO 1 時間","new_table_proposal":null},
+    {"proposed_type":"product","canonical_name":"NovaTech Assist","attributes":{},"confidence":0.9,"evidence":"NovaTech Assist を規定","new_table_proposal":null}
   ],
   "relations": [
-    {"proposed_junction":"governance","from":"IBM Bob","to":"i127-9285","attributes":{},"evidence":"本サービス記述書 ... IBM Bob を規定","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"compliance","from":"i127-9285","to":"ISO 27001","attributes":{},"evidence":"ISO 27001 に準拠","confidence":0.9,"new_junction_proposal":null},
-    {"proposed_junction":"compliance","from":"i127-9285","to":"SOC 2 Type II","attributes":{},"evidence":"SOC 2 Type II に準拠","confidence":0.9,"new_junction_proposal":null}
+    {"proposed_junction":"governance","from":"NovaTech Assist","to":"sd-100","attributes":{},"evidence":"本契約書 ... NovaTech Assist を規定","confidence":0.9,"new_junction_proposal":null},
+    {"proposed_junction":"compliance","from":"sd-100","to":"ISO 27001","attributes":{},"evidence":"ISO 27001 に準拠","confidence":0.9,"new_junction_proposal":null},
+    {"proposed_junction":"compliance","from":"sd-100","to":"SOC 2 Type II","attributes":{},"evidence":"SOC 2 Type II に準拠","confidence":0.9,"new_junction_proposal":null}
   ],
   "weak_relations": []
 }
