@@ -321,6 +321,158 @@ def _find_resolved(name_to_id: dict, table_hint: str, name: str) -> tuple[str, i
     return None
 
 
+# ---------- in-doc dedup (pre-DB confidence-based selection) ----------
+
+def _compute_cardinality_key(
+    r: RelationExtraction, name_to_id: dict,
+) -> tuple | None:
+    """同 doc 内 groupby のキー。endpoint が解決できない / starter 外なら None。
+
+    None を返した relation は groupby から外れ、現状経路 (_resolve_relation) に
+    素通しされる (cardinality 衝突は DB 側の cardinality_violation 経路で処理)。
+    """
+    j = r.proposed_junction
+    if j not in STARTER_JUNCTIONS:
+        return None
+    if j == "compliance":
+        src = _find_resolved(name_to_id, "contract", r.from_)
+        if src is None or src[0] != "contract":
+            return None
+        standard = (r.to or "").strip()
+        if not standard:
+            return None
+        return ("compliance", src[1], standard)
+    expected_from, expected_to = _JUNCTION_FROM_TYPE[j]
+    src = _find_resolved(name_to_id, expected_from, r.from_)
+    dst = _find_resolved(name_to_id, expected_to, r.to)
+    if src is None or dst is None:
+        return None
+    if j == "manufacturing":
+        prod_id = src[1] if src[0] == "product" else dst[1]
+        return ("manufacturing", prod_id)
+    if j == "org_hierarchy":
+        # child = expected_to 側 (dst)
+        return ("org_hierarchy", dst[1])
+    if j == "product_variant":
+        # variant = expected_to 側 (dst)
+        return ("product_variant", dst[1])
+    if j == "employment":
+        person_id = src[1] if src[0] == "person" else dst[1]
+        org_id    = dst[1] if dst[0] == "organization" else src[1]
+        start_date = (r.attributes or {}).get("start_date")
+        return ("employment", person_id, org_id, start_date)
+    if j == "governance":
+        product_id  = src[1] if src[0] == "product" else dst[1]
+        contract_id = dst[1] if dst[0] == "contract" else src[1]
+        return ("governance", product_id, contract_id)
+    return None
+
+
+def _dedup_cardinality_relations(
+    relations: list[RelationExtraction], name_to_id: dict,
+) -> tuple[list[RelationExtraction], list[tuple[RelationExtraction, RelationExtraction]]]:
+    """同 cardinality キーを持つ relations を 1 件にまとめる。
+
+    各 group で confidence 降順 + 原 index 昇順で deterministic に winner を選ぶ。
+    key=None の relation はそのまま winners に通す。
+    戻り値: (winners, [(loser, chosen_winner), ...])
+    """
+    groups: dict[tuple, list[tuple[int, RelationExtraction]]] = {}
+    bypass: list[tuple[int, RelationExtraction]] = []
+    for idx, r in enumerate(relations):
+        key = _compute_cardinality_key(r, name_to_id)
+        if key is None:
+            bypass.append((idx, r))
+            continue
+        groups.setdefault(key, []).append((idx, r))
+    winners: list[tuple[int, RelationExtraction]] = list(bypass)
+    losers: list[tuple[RelationExtraction, RelationExtraction]] = []
+    for items in groups.values():
+        items_sorted = sorted(items, key=lambda it: (-it[1].confidence, it[0]))
+        win = items_sorted[0]
+        winners.append(win)
+        for _, lo in items_sorted[1:]:
+            losers.append((lo, win[1]))
+    winners.sort(key=lambda it: it[0])
+    return [r for _, r in winners], losers
+
+
+def _resolve_product_variant_direction(
+    winners: list[RelationExtraction], name_to_id: dict,
+) -> tuple[list[RelationExtraction], list[tuple[RelationExtraction, RelationExtraction]]]:
+    """product_variant winners について「親子両方に登場する node」を見つけ、
+    conf 合計が大きい side を残す。cycle 算出はせず、set 演算と sum のみ。
+    """
+    pvs: list[tuple[int, RelationExtraction, int, int]] = []
+    for idx, r in enumerate(winners):
+        if r.proposed_junction != "product_variant":
+            continue
+        src = _find_resolved(name_to_id, "product", r.from_)
+        dst = _find_resolved(name_to_id, "product", r.to)
+        if src is None or dst is None or src[0] != "product" or dst[0] != "product":
+            continue
+        pvs.append((idx, r, src[1], dst[1]))
+    if not pvs:
+        return list(winners), []
+    parent_ids = {parent for _, _, parent, _ in pvs}
+    variant_ids = {variant for _, _, _, variant in pvs}
+    conflicting = parent_ids & variant_ids
+    if not conflicting:
+        return list(winners), []
+    drop_indices: set[int] = set()
+    losers: list[tuple[RelationExtraction, RelationExtraction]] = []
+    for node in sorted(conflicting):
+        as_parent = [(idx, r) for idx, r, p, _ in pvs if p == node and idx not in drop_indices]
+        as_child  = [(idx, r) for idx, r, _, v in pvs if v == node and idx not in drop_indices]
+        if not as_parent or not as_child:
+            continue
+        score_parent = sum(r.confidence for _, r in as_parent)
+        score_child  = sum(r.confidence for _, r in as_child)
+        # 高 score 側を winner として残す。tie は as_parent (= 親方向) を残す
+        # (経験則: 同 doc 内で 1 entity から多くの variant が出る形が自然)
+        if score_parent >= score_child:
+            losing = as_child
+            keeping = as_parent
+        else:
+            losing = as_parent
+            keeping = as_child
+        winner_rep = max(keeping, key=lambda it: (it[1].confidence, -it[0]))[1]
+        for idx, loser_r in losing:
+            drop_indices.add(idx)
+            losers.append((loser_r, winner_rep))
+    if not drop_indices:
+        return list(winners), losers
+    kept = [r for idx, r in enumerate(winners) if idx not in drop_indices]
+    return kept, losers
+
+
+def _stage_alternative_proposal(
+    db, doc_id: int,
+    loser: RelationExtraction,
+    winner: RelationExtraction,
+    counters: dict,
+) -> None:
+    """loser を staging_extractions に積む (winner との比較情報付き)。"""
+    kg.add_staging_extraction(
+        db, doc_id,
+        raw_payload=loser.model_dump_json(),
+        proposed_table=loser.proposed_junction,
+        match_summary=_build_match_summary(
+            "alternative_proposal_lower_confidence",
+            extra={
+                "junction": loser.proposed_junction,
+                "loser_from": loser.from_,
+                "loser_to": loser.to,
+                "loser_confidence": loser.confidence,
+                "winner_from": winner.from_,
+                "winner_to": winner.to,
+                "winner_confidence": winner.confidence,
+            },
+        ),
+    )
+    counters["staged_alt_proposal"] = counters.get("staged_alt_proposal", 0) + 1
+
+
 def _resolve_relation(
     db,
     r: RelationExtraction,
@@ -675,10 +827,18 @@ def ingest_file(path: str) -> dict:
             eid = _resolve_entity(db, e, doc_id, counters)
             if eid is not None:
                 name_to_id[(e.proposed_type, e.canonical_name)] = eid
-        # ② relations
+        # ② relations: 同 doc 内の重複候補を Pre-DB で間引きしてから流す
         print("[4] resolve_relation (junctions / weak / staging)")
-        for r in g.relations:
+        gb_winners, gb_losers = _dedup_cardinality_relations(g.relations, name_to_id)
+        pv_winners, pv_losers = _resolve_product_variant_direction(gb_winners, name_to_id)
+        for r in pv_winners:
             _resolve_relation(db, r, doc_id, name_to_id, counters)
+        for loser, winner in (*gb_losers, *pv_losers):
+            _stage_alternative_proposal(db, doc_id, loser, winner, counters)
+        if len(g.relations) > len(pv_winners):
+            counters["dedup_winner_kept"] = (
+                counters.get("dedup_winner_kept", 0) + (len(g.relations) - len(pv_winners))
+            )
         # ③ weak
         for w in g.weak_relations:
             _route_weak_extraction(db, w, doc_id, name_to_id)

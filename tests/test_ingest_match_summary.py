@@ -188,6 +188,124 @@ def test_cardinality_violation_carries_structured_reason(tmp_db):
     assert m["junction"] == "manufacturing"
 
 
+# ---------- in-doc dedup (Pre-DB confidence-based selection) ----------
+
+def _pv_relation(from_: str, to: str, conf: float) -> RelationExtraction:
+    return RelationExtraction(
+        proposed_junction="product_variant",
+        **{"from": from_, "to": to},
+        attributes={},
+        confidence=conf,
+        evidence="dummy",
+    )
+
+
+def test_indoc_dedup_picks_highest_confidence_winner(tmp_db):
+    """i127-9285 リプロ: 逆向き (Pro→Bob, 0.9) が direction conflict で loser に。"""
+    with kg.writer(tmp_db):
+        bob,   _ = kg.upsert_entity(tmp_db, "product", "IBM Bob")
+        pro,   _ = kg.upsert_entity(tmp_db, "product", "IBM Bob Pro")
+        plus,  _ = kg.upsert_entity(tmp_db, "product", "IBM Bob Pro Plus")
+        ultra, _ = kg.upsert_entity(tmp_db, "product", "IBM Bob Ultra")
+    name_to_id = {
+        ("product", "IBM Bob"):          bob,
+        ("product", "IBM Bob Pro"):      pro,
+        ("product", "IBM Bob Pro Plus"): plus,
+        ("product", "IBM Bob Ultra"):    ultra,
+    }
+    r0 = _pv_relation("IBM Bob Pro", "IBM Bob",          0.9)
+    r1 = _pv_relation("IBM Bob",     "IBM Bob Pro",      0.7)
+    r2 = _pv_relation("IBM Bob",     "IBM Bob Pro Plus", 0.7)
+    r3 = _pv_relation("IBM Bob",     "IBM Bob Ultra",    0.7)
+    relations = [r0, r1, r2, r3]
+
+    gb_winners, gb_losers = ingest._dedup_cardinality_relations(relations, name_to_id)
+    # variant_id が全部別なので groupby では落ちない
+    assert len(gb_winners) == 4
+    assert gb_losers == []
+
+    pv_winners, pv_losers = ingest._resolve_product_variant_direction(
+        gb_winners, name_to_id,
+    )
+    # 逆向き r0 が loser、正しい向き 3 件が残る
+    assert len(pv_winners) == 3
+    assert all(w.from_ == "IBM Bob" for w in pv_winners)
+    assert {w.to for w in pv_winners} == {"IBM Bob Pro", "IBM Bob Pro Plus", "IBM Bob Ultra"}
+    assert len(pv_losers) == 1
+    loser, chosen_winner = pv_losers[0]
+    assert loser.from_ == "IBM Bob Pro" and loser.to == "IBM Bob"
+    assert chosen_winner in pv_winners
+
+
+def test_indoc_dedup_tiebreaker_uses_first_index(tmp_db):
+    """同 cardinality key + 同 conf なら先頭が winner。"""
+    with kg.writer(tmp_db):
+        bob, _ = kg.upsert_entity(tmp_db, "product", "Bob")
+        pro, _ = kg.upsert_entity(tmp_db, "product", "Pro")
+    name_to_id = {("product", "Bob"): bob, ("product", "Pro"): pro}
+    # 同じ variant=Pro を target にする 2 件、同 conf
+    r0 = _pv_relation("Bob", "Pro", 0.7)
+    r1 = _pv_relation("Bob", "Pro", 0.7)  # 内容同じだが別 instance
+    winners, losers = ingest._dedup_cardinality_relations([r0, r1], name_to_id)
+    assert len(winners) == 1
+    assert winners[0] is r0
+    assert len(losers) == 1
+    assert losers[0][0] is r1
+    assert losers[0][1] is r0
+
+
+def test_indoc_dedup_stages_loser_as_alternative_proposal(tmp_db):
+    """loser が staging に reason='alternative_proposal_lower_confidence' で記録される。"""
+    with kg.writer(tmp_db):
+        doc = _doc(tmp_db)
+        loser  = _pv_relation("IBM Bob Pro", "IBM Bob",     0.9)
+        winner = _pv_relation("IBM Bob",     "IBM Bob Pro", 0.7)
+        ingest._stage_alternative_proposal(tmp_db, doc, loser, winner, {})
+
+    row = tmp_db.execute(
+        "SELECT proposed_table, match_summary FROM staging_extractions"
+        " WHERE status='pending'"
+    ).fetchone()
+    assert row is not None
+    assert row["proposed_table"] == "product_variant"
+    m = json.loads(row["match_summary"])
+    assert m["reason"] == "alternative_proposal_lower_confidence"
+    assert m["junction"] == "product_variant"
+    assert m["loser_from"] == "IBM Bob Pro"
+    assert m["loser_to"]   == "IBM Bob"
+    assert m["winner_from"] == "IBM Bob"
+    assert m["winner_to"]   == "IBM Bob Pro"
+    assert m["loser_confidence"]  == 0.9
+    assert m["winner_confidence"] == 0.7
+
+
+def test_indoc_dedup_handles_compliance_keyed_by_standard(tmp_db):
+    """compliance も groupby 対象。同 (contract, standard) で conf 高い方が winner。"""
+    with kg.writer(tmp_db):
+        ct, _ = kg.upsert_entity(tmp_db, "contract", "MSA")
+    name_to_id = {("contract", "MSA"): ct}
+    r_high = RelationExtraction(
+        proposed_junction="compliance",
+        **{"from": "MSA", "to": "ISO 27001"},
+        attributes={},
+        confidence=0.9,
+        evidence="src high",
+    )
+    r_low = RelationExtraction(
+        proposed_junction="compliance",
+        **{"from": "MSA", "to": "ISO 27001"},
+        attributes={},
+        confidence=0.7,
+        evidence="src low",
+    )
+    winners, losers = ingest._dedup_cardinality_relations([r_low, r_high], name_to_id)
+    assert len(winners) == 1
+    assert winners[0] is r_high
+    assert len(losers) == 1
+    assert losers[0][0] is r_low
+    assert losers[0][1] is r_high
+
+
 def test_every_match_summary_is_valid_json(tmp_db):
     """全 staging 経路で match_summary が JSON.parse 可能であること。"""
     with kg.writer(tmp_db):

@@ -52,6 +52,20 @@ RELATION_CLAIM_COLUMNS: dict[str, tuple[str, ...]] = {
     "compliance":      (),
 }
 
+# 各 junction の cardinality キー (= schema.sql の UNIQUE 制約 + 多対多の全エンドポイント)。
+# 同 doc 内で重複候補を groupby するときの単一 source of truth。
+# 単列 UNIQUE: cardinality_violation が起きる → 高 conf 1 件を winner、他を staging に escalate。
+# 多対多 (governance/compliance): 同値同士なら find_or_create が "existing" を返すので、
+#   groupby しても無害。同一エンドポイントで複数提案された時の dedup に使う。
+RELATION_CARDINALITY_KEY: dict[str, tuple[str, ...]] = {
+    "employment":      ("person_id", "organization_id", "start_date"),
+    "manufacturing":   ("product_id",),
+    "org_hierarchy":   ("child_org_id",),
+    "product_variant": ("variant_product_id",),
+    "governance":      ("product_id", "contract_id"),
+    "compliance":      ("contract_id", "standard_name"),
+}
+
 # canonical 列名 → conflict_kinds.kind
 def _conflict_kind(table: str, column: Optional[str], *, existence: bool = False) -> str:
     if existence:
