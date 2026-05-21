@@ -72,6 +72,150 @@ def entity_list(table: str, q: str = ""):
     return [dict(r) for r in db.execute(sql, args)]
 
 
+def _entity_relations(db, table: str, eid: int) -> list[dict]:
+    """全 6 junction を統一フォーマットで返す.
+
+    出力形式:
+      {kind, id, other_table, other_id, other_canonical, role_label,
+       attrs, confidence, doc_slug}
+    standard_name など free-text 相手の場合 other_table=None, other_canonical=None,
+    attrs に値が入る (compliance 等).
+    """
+    out: list[dict] = []
+
+    def _emit(rows, *, kind, role_label, other_table, other_field,
+              attr_cols=()):
+        for r in rows:
+            d = dict(r)
+            other_id = d.get(other_field)
+            attrs = {c: d.get(c) for c in attr_cols if d.get(c) is not None}
+            out.append({
+                "kind": kind,
+                "id": d["id"],
+                "other_table": other_table,
+                "other_id": other_id,
+                "other_canonical": d.get("other_canonical"),
+                "role_label": role_label,
+                "attrs": attrs,
+                "confidence": d.get("confidence"),
+                "doc_slug": d.get("doc_slug"),
+            })
+
+    if table == "person":
+        rows = db.execute(
+            "SELECT e.*, o.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM employment e JOIN organization o ON o.id=e.organization_id "
+            "JOIN documents d ON d.id=e.document_id WHERE e.person_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="employment", role_label="employed_by",
+              other_table="organization", other_field="organization_id",
+              attr_cols=("role", "start_date", "end_date"))
+
+    elif table == "organization":
+        rows = db.execute(
+            "SELECT e.*, p.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM employment e JOIN person p ON p.id=e.person_id "
+            "JOIN documents d ON d.id=e.document_id WHERE e.organization_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="employment", role_label="employs",
+              other_table="person", other_field="person_id",
+              attr_cols=("role", "start_date", "end_date"))
+        rows = db.execute(
+            "SELECT m.*, p.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM manufacturing m JOIN product p ON p.id=m.product_id "
+            "JOIN documents d ON d.id=m.document_id WHERE m.organization_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="manufacturing", role_label="manufactures",
+              other_table="product", other_field="product_id")
+        rows = db.execute(
+            "SELECT h.*, o.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM org_hierarchy h JOIN organization o ON o.id=h.child_org_id "
+            "JOIN documents d ON d.id=h.document_id WHERE h.parent_org_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="org_hierarchy", role_label="parent_of",
+              other_table="organization", other_field="child_org_id")
+        rows = db.execute(
+            "SELECT h.*, o.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM org_hierarchy h JOIN organization o ON o.id=h.parent_org_id "
+            "JOIN documents d ON d.id=h.document_id WHERE h.child_org_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="org_hierarchy", role_label="child_of",
+              other_table="organization", other_field="parent_org_id")
+
+    elif table == "product":
+        rows = db.execute(
+            "SELECT m.*, o.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM manufacturing m JOIN organization o ON o.id=m.organization_id "
+            "JOIN documents d ON d.id=m.document_id WHERE m.product_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="manufacturing", role_label="manufactured_by",
+              other_table="organization", other_field="organization_id")
+        rows = db.execute(
+            "SELECT v.*, p.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM product_variant v JOIN product p ON p.id=v.variant_product_id "
+            "JOIN documents d ON d.id=v.document_id WHERE v.parent_product_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="product_variant", role_label="parent_of",
+              other_table="product", other_field="variant_product_id")
+        rows = db.execute(
+            "SELECT v.*, p.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM product_variant v JOIN product p ON p.id=v.parent_product_id "
+            "JOIN documents d ON d.id=v.document_id WHERE v.variant_product_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="product_variant", role_label="variant_of",
+              other_table="product", other_field="parent_product_id")
+        rows = db.execute(
+            "SELECT g.*, c.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM governance g JOIN contract c ON c.id=g.contract_id "
+            "JOIN documents d ON d.id=g.document_id WHERE g.product_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="governance", role_label="governed_by",
+              other_table="contract", other_field="contract_id")
+
+    elif table == "contract":
+        rows = db.execute(
+            "SELECT g.*, p.canonical_name AS other_canonical, d.slug AS doc_slug "
+            "FROM governance g JOIN product p ON p.id=g.product_id "
+            "JOIN documents d ON d.id=g.document_id WHERE g.contract_id=?",
+            (eid,),
+        ).fetchall()
+        _emit(rows, kind="governance", role_label="governs",
+              other_table="product", other_field="product_id")
+        rows = db.execute(
+            "SELECT c.*, d.slug AS doc_slug FROM compliance c "
+            "JOIN documents d ON d.id=c.document_id WHERE c.contract_id=?",
+            (eid,),
+        ).fetchall()
+        for r in rows:
+            d = dict(r)
+            out.append({
+                "kind": "compliance",
+                "id": d["id"],
+                "other_table": None,
+                "other_id": None,
+                "other_canonical": d.get("standard_name"),
+                "role_label": "complies_with",
+                "attrs": {
+                    "standard_name": d.get("standard_name"),
+                    **({"certified_until": d["certified_until"]}
+                       if d.get("certified_until") else {}),
+                },
+                "confidence": d.get("confidence"),
+                "doc_slug": d.get("doc_slug"),
+            })
+
+    return out
+
+
 @app.get("/api/{table}/{eid:int}")
 def entity_detail(table: str, eid: int):
     if table not in kg.ENTITY_TABLES:
@@ -89,36 +233,7 @@ def entity_detail(table: str, eid: int):
         f"WHERE c.{table}_id=? ORDER BY c.created_at DESC",
         (eid,),
     ).fetchall()
-    # incoming relations (junction tables)
-    relations = []
-    if table == "person":
-        relations = db.execute(
-            "SELECT e.id, o.canonical_name AS organization, e.role, e.start_date, e.end_date, "
-            "e.confidence, d.slug AS doc_slug "
-            "FROM employment e JOIN organization o ON o.id=e.organization_id "
-            "JOIN documents d ON d.id=e.document_id WHERE e.person_id=?",
-            (eid,),
-        ).fetchall()
-    elif table == "organization":
-        emp = db.execute(
-            "SELECT e.id, p.canonical_name AS person, e.role, e.start_date, e.end_date, "
-            "e.confidence FROM employment e JOIN person p ON p.id=e.person_id "
-            "WHERE e.organization_id=?", (eid,),
-        ).fetchall()
-        mfg = db.execute(
-            "SELECT m.id, p.canonical_name AS product, m.confidence "
-            "FROM manufacturing m JOIN product p ON p.id=m.product_id "
-            "WHERE m.organization_id=?", (eid,),
-        ).fetchall()
-        relations = [dict(r) | {"kind": "employment"} for r in emp] + [
-            dict(r) | {"kind": "manufacturing"} for r in mfg
-        ]
-    elif table == "product":
-        relations = db.execute(
-            "SELECT m.id, o.canonical_name AS organization, m.confidence "
-            "FROM manufacturing m JOIN organization o ON o.id=m.organization_id "
-            "WHERE m.product_id=?", (eid,),
-        ).fetchall()
+    relations = _entity_relations(db, table, eid)
     mentions = db.execute(
         "SELECT m.surface_form, d.slug AS doc_slug FROM entity_mentions m "
         "JOIN documents d ON d.id=m.document_id "
@@ -129,7 +244,7 @@ def entity_detail(table: str, eid: int):
         "entity": dict(e),
         "aliases": [r["alias"] for r in aliases],
         "claims": [dict(r) for r in claims],
-        "relations": [dict(r) if not isinstance(r, dict) else r for r in relations],
+        "relations": relations,
         "mentions": [dict(r) for r in mentions],
     }
 
@@ -208,6 +323,7 @@ def proposal_validate(pid: int):
         "dry_ok": dry.ok if dry else None,
         "dry_reason": dry.reason if dry else None,
         "diff": dry.diff if dry else None,
+        "column_diff": pr.column_diff(dry.diff) if dry and dry.ok else None,
     }
 
 
@@ -297,19 +413,54 @@ def staging_reject(sid: int):
 
 
 # ---------- weak_relations triage ----------
+# entity_table が動的なので polymorphic FK 解決は CASE/COALESCE で行う。
+# starter set 外の table 値が入っていても安全 (どの分岐にもヒットせず NULL)。
+_WEAK_ENT_TABLES = ("person", "organization", "product", "project", "contract")
+
+
+def _coalesce_canonical(side: str) -> str:
+    """side ∈ {'subject','object'} 用の COALESCE サブクエリ式を組み立てる."""
+    parts = [
+        f"(SELECT canonical_name FROM {t} WHERE w.{side}_table='{t}' AND id=w.{side}_id)"
+        for t in _WEAK_ENT_TABLES
+    ]
+    return "COALESCE(\n    " + ",\n    ".join(parts) + "\n  )"
+
+
 @app.get("/api/weak_relations")
 def weak_relations(predicate: str = ""):
     db = ro()
     if predicate:
-        rows = db.execute(
-            "SELECT * FROM weak_relations WHERE promoted_to IS NULL AND predicate=? "
-            "ORDER BY created_at DESC", (predicate,),
+        sql = (
+            "SELECT w.*, "
+            f"{_coalesce_canonical('subject')} AS subject_canonical, "
+            f"{_coalesce_canonical('object')} AS object_canonical, "
+            "d.slug AS doc_slug "
+            "FROM weak_relations w "
+            "LEFT JOIN documents d ON d.id=w.document_id "
+            "WHERE w.promoted_to IS NULL AND w.predicate=? "
+            "ORDER BY w.created_at DESC LIMIT 500"
         )
+        rows = db.execute(sql, (predicate,))
     else:
         rows = db.execute(
             "SELECT predicate, COUNT(*) n FROM weak_relations WHERE promoted_to IS NULL "
             "GROUP BY predicate ORDER BY n DESC",
         )
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/weak_relations/matrix")
+def weak_matrix():
+    """predicate × subject_table × object_table の件数集計 (heatmap 用)."""
+    db = ro()
+    rows = db.execute(
+        "SELECT predicate, subject_table, "
+        "COALESCE(object_table,'(text)') AS object_table, COUNT(*) AS n "
+        "FROM weak_relations WHERE promoted_to IS NULL "
+        "GROUP BY predicate, subject_table, object_table "
+        "ORDER BY n DESC",
+    )
     return [dict(r) for r in rows]
 
 

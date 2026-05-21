@@ -254,6 +254,66 @@ def _diff_schema(before: dict[str, str], after: dict[str, str]) -> list[dict]:
     return out
 
 
+def column_diff(diff: list[dict] | None) -> dict[str, dict] | None:
+    """`_diff_schema` 出力から table 単位の列差分を抽出する.
+
+    各 `table:<name>` エントリについて, before/after の DDL を別々の in-memory
+    SQLite に流し直して `PRAGMA table_info` で列を取り, added/removed/kept を
+    返す. CHECK/UNIQUE/FK は SQLite に解釈させるので regex より頑健.
+    `index:` / `trigger:` などは対象外 (None).
+    """
+    if not diff:
+        return None
+    out: dict[str, dict] = {}
+    for entry in diff:
+        obj = entry.get("object") or ""
+        if not obj.startswith("table:"):
+            continue
+        change = entry.get("change")
+        raw_before = entry.get("before") if change in ("modified", "removed") else None
+        raw_after = entry.get("after") if change == "modified" else (
+            entry.get("sql") if change == "added" else None
+        )
+        before_cols = _columns_for(raw_before) if raw_before else []
+        after_cols = _columns_for(raw_after) if raw_after else []
+        b_names = {c["name"] for c in before_cols}
+        a_names = {c["name"] for c in after_cols}
+        out[obj] = {
+            "before_columns": before_cols if raw_before else None,
+            "after_columns": after_cols if raw_after else None,
+            "added": [c["name"] for c in after_cols if c["name"] not in b_names],
+            "removed": [c["name"] for c in before_cols if c["name"] not in a_names],
+            "kept": [c["name"] for c in after_cols if c["name"] in b_names],
+            "raw_before": raw_before,
+            "raw_after": raw_after,
+        }
+    return out or None
+
+
+def _columns_for(create_sql: str) -> list[dict]:
+    """単一の CREATE TABLE DDL を :memory: に流して PRAGMA table_info を取る."""
+    try:
+        db = sqlite3.connect(":memory:")
+        db.execute(create_sql)
+        # CREATE TABLE foo (...) のテーブル名を sqlite_master から取得
+        row = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
+        ).fetchone()
+        if not row:
+            db.close()
+            return []
+        name = row[0]
+        info = db.execute(f"PRAGMA table_info({name})").fetchall()
+        db.close()
+        return [
+            {"name": r[1], "type": r[2], "notnull": bool(r[3]),
+             "dflt_value": r[4], "pk": bool(r[5])}
+            for r in info
+        ]
+    except sqlite3.Error:
+        return []
+
+
 def apply(
     db: sqlite3.Connection,
     proposal_id: int,
