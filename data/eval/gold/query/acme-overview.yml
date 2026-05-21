@@ -38,7 +38,8 @@ qa:
 
   # === count ===
   - q: "登録されている person の数は？"
-    expected_row_contains: []
+    expected_row_contains:
+      - {value: "2"}
 
   # === claims 履歴 (linter R2 例) ===
   - q: "山田 太郎の役職の履歴は？"
