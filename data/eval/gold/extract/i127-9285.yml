@@ -1,6 +1,9 @@
-# Typed-schema extract gold (i127-9285)。starter (person/organization/product/project) 中心。
+# Typed-schema extract gold (i127-9285)。starter (person/organization/product/project/contract) 中心。
 # 元の concept 型 entity と product-product "オファリング/アドオン対象" 関係は starter には無いため
-# 大部分が weak_relations に積まれる想定 (将来の typed 化候補)。
+# weak_relations に積む (将来の typed 化候補): アドオン / イネーブリング・ソフトウェア /
+# 1000 RU パック・年単位計測 (Bob Enterprise 固有の販売単位は product 列で表現しきれない)。
+# 月間使用量 / 無料評価版条件は product の typed 列 (billing_period / included_quota_units /
+# quota_unit_name / trial_period_days, 0004 migration) に typed 化済み。
 schema_version: 2
 doc_slug: i127-9285
 source: data/eval/sources/i127-9285.md
@@ -18,18 +21,39 @@ entities:
   - proposed_type: product
     canonical_name: "IBM Bob Pro"
     aliases: ["Bob Pro"]
+    attributes:
+      billing_period: monthly
+      included_quota_units: 40
+      quota_unit_name: "Bobcoin"
   - proposed_type: product
     canonical_name: "IBM Bob Pro Plus"
     aliases: ["Bob Pro Plus"]
+    attributes:
+      billing_period: monthly
+      included_quota_units: 160
+      quota_unit_name: "Bobcoin"
   - proposed_type: product
     canonical_name: "IBM Bob Ultra"
     aliases: ["Bob Ultra"]
+    attributes:
+      billing_period: monthly
+      included_quota_units: 500
+      quota_unit_name: "Bobcoin"
   - proposed_type: product
     canonical_name: "IBM Bob Enterprise"
     aliases: ["Bob Enterprise"]
+    attributes:
+      billing_period: annual
+      included_quota_units: 1000
+      quota_unit_name: "Bobcoin"
   - proposed_type: product
     canonical_name: "IBM Bob 無料評価版"
     aliases: ["Bob 無料評価版"]
+    attributes:
+      billing_period: one_time
+      included_quota_units: 40
+      quota_unit_name: "Bobcoin"
+      trial_period_days: 30
 
   - proposed_type: product
     canonical_name: "IBM Bob Premium Package for Java Modernization Individual"
@@ -108,3 +132,8 @@ weak_relations:
   # イネーブリング・ソフトウェア
   - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob-Shell"}
   - {subject: "IBM Bob", predicate: "イネーブリング・ソフトウェア", object: "Bob IDE"}
+  # Bob Enterprise 固有: pack 単位販売 (included_quota_units=1000 は 1 パック分。
+  # product 列では「1000 = pack 単位かつ複数取得可」の構造を表現できないので weak で補足)
+  - {subject: "IBM Bob Enterprise", predicate: "販売単位",     object: "1000 リソース単位パック"}
+  # 無料評価版: 提供回数制限は product 列で表現できないので weak へ
+  - {subject: "IBM Bob 無料評価版", predicate: "提供回数制限", object: "一回のみ"}

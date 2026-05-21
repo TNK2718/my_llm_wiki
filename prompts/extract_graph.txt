@@ -4,7 +4,7 @@
 starter 型と attributes:
 - person          自然人。birth_date (YYYY-MM-DD) / nationality
 - organization    会社・組織・大学・政府の **固有名詞のみ**。org_type ∈ {company,lab,team,university,government,nonprofit,other} / founded_year / headquarters
-- product         商品・サービスの **固有名詞のみ**。release_date / category
+- product         商品・サービスの **固有名詞のみ**。release_date / category / billing_period ∈ {monthly,annual,one_time} / included_quota_units (数値) / quota_unit_name (例: 'Bobcoin') / trial_period_days (整数)
 - project         プロジェクト・施策。started_at / ended_at
 - contract        サービス記述書・利用規約・SLA・セキュリティ補遺・DPA 等の法的/契約文書。contract_type ∈ {service_description,terms_of_service,sla,security_addendum,data_processing,other} / effective_date / valid_until / jurisdiction / url / version / sla_uptime_percent (例: 99.9) / sla_response_time_minutes / rto_hours / rpo_hours
 

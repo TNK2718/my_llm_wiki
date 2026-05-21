@@ -161,19 +161,26 @@ CREATE INDEX IF NOT EXISTS ix_organization_aliases_nk    ON organization_aliases
 
 -- product ---------------------------------------------------
 CREATE TABLE IF NOT EXISTS product (
-  id             INTEGER PRIMARY KEY,
-  canonical_name TEXT NOT NULL,
-  norm_key       TEXT NOT NULL UNIQUE,
-  release_date   TEXT,
-  category       TEXT,
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
+  id                   INTEGER PRIMARY KEY,
+  canonical_name       TEXT NOT NULL,
+  norm_key             TEXT NOT NULL UNIQUE,
+  release_date         TEXT,
+  category             TEXT,
+  -- 課金単位 (subscription SaaS で range クエリ可能にするため typed 化)
+  billing_period       TEXT CHECK (billing_period IS NULL OR billing_period IN ('monthly','annual','one_time')),
+  included_quota_units REAL CHECK (included_quota_units IS NULL OR included_quota_units >= 0),
+  quota_unit_name      TEXT,
+  trial_period_days    INTEGER CHECK (trial_period_days IS NULL OR trial_period_days >= 0),
+  created_at           TEXT NOT NULL,
+  updated_at           TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS product_claims (
   id          INTEGER PRIMARY KEY,
   product_id  INTEGER NOT NULL REFERENCES product(id) ON DELETE CASCADE,
   column_name TEXT NOT NULL
-              CHECK (column_name IN ('canonical_name','release_date','category')),
+              CHECK (column_name IN (
+                'canonical_name','release_date','category',
+                'billing_period','included_quota_units','quota_unit_name','trial_period_days')),
   value       TEXT,
   document_id INTEGER NOT NULL REFERENCES documents(id),
   evidence    TEXT,

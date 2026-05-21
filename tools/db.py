@@ -33,7 +33,8 @@ ENTITY_TABLES: tuple[str, ...] = ("person", "organization", "product", "project"
 ENTITY_CLAIM_COLUMNS: dict[str, tuple[str, ...]] = {
     "person":       ("canonical_name", "birth_date", "nationality"),
     "organization": ("canonical_name", "org_type", "founded_year", "headquarters"),
-    "product":      ("canonical_name", "release_date", "category"),
+    "product":      ("canonical_name", "release_date", "category",
+                     "billing_period", "included_quota_units", "quota_unit_name", "trial_period_days"),
     "project":      ("canonical_name", "started_at", "ended_at"),
     "contract":     ("canonical_name", "contract_type", "effective_date", "valid_until",
                      "jurisdiction", "url", "version",
