@@ -56,7 +56,8 @@ def test_locate_value_span_finds_canonical_in_dump():
     assert span is not None
     a, b = span
     assert content.encode("utf-8")[a:b] == b"Alice"
-    assert cursor[0] == b  # 前進している
+    # cursor は閉じ quote の次まで進む (内側終端 + 1)
+    assert cursor[0] == b + 1
 
 
 def test_locate_value_span_advances_cursor_on_duplicate():
@@ -105,6 +106,68 @@ def test_apply_logprob_confidence_fallback_on_missing_span():
     ])
     apply_logprob_confidence(g, content, tokens)
     assert g.entities[0].confidence == FALLBACK_CONFIDENCE
+
+
+def test_locate_value_span_skips_substring_in_evidence():
+    # entities[0].evidence の中に "大阪" が raw 文字として出現するが、
+    # それは JSON 文字列の境界ではない (両端 `"` が無い) ので skip され、
+    # entities[1].canonical_name の `"大阪"` にマッチする
+    content = (
+        '{"entities": ['
+        '{"canonical_name": "東京", "evidence": "大阪本社が東京に移転"},'
+        '{"canonical_name": "大阪"}'
+        ']}'
+    )
+    cb = content.encode("utf-8")
+    cursor = [0]
+    # まず "東京" を消費して cursor 進める
+    s_tokyo = _locate_value_span(cb, "東京", cursor)
+    assert s_tokyo is not None
+    # 続いて "大阪" — 旧実装なら evidence 内の `大阪本社` の `大阪` に hit したが、
+    # 新実装は両端 quote 込みなので canonical_name の `"大阪"` だけにマッチする
+    s_osaka = _locate_value_span(cb, "大阪", cursor)
+    assert s_osaka is not None
+    # 期待: canonical_name の値の位置 (evidence より後)
+    canonical_osaka_pos = cb.find(b'"\xe5\xa4\xa7\xe9\x98\xaa"', cb.find(b'canonical_name', 50))
+    # 内側は開き quote の次から始まる
+    assert s_osaka[0] == canonical_osaka_pos + 1
+
+
+def test_locate_value_span_ascii_escape_fallback():
+    # LLM が `é` 形式でエスケープして出力するケース。content_text の bytes は
+    # raw `é` (UTF-8 c3 a9) を含まず ASCII escape の `é` (8 bytes) を含む。
+    # ensure_ascii=False の needle (`"café"`) では bytes 一致せず、ensure_ascii=True
+    # の needle (`"café"`) にフォールバックして見つかる
+    content = '{"name": "caf\\u00e9", "x": 1}'  # bytes 上は `café` (escape 形)
+    cb = content.encode("utf-8")
+    assert b"caf\\u00e9" in cb
+    assert b"caf\xc3\xa9" not in cb  # raw UTF-8 の é は無い
+    cursor = [0]
+    span = _locate_value_span(cb, "café", cursor)
+    assert span is not None
+    # 内側 bytes は ascii escape された 8 bytes
+    assert cb[span[0]:span[1]] == b"caf\\u00e9"
+
+
+def test_apply_logprob_confidence_respects_raw_section_order():
+    # LLM が relations を entities より先に出した場合でも、raw を渡せば
+    # cursor が物理 JSON 順に従って進み、誤マッチしない
+    content = '{"relations": [{"from": "Alice", "to": "Acme"}], "entities": [{"proposed_type": "person", "canonical_name": "Alice"}]}'
+    raw = {  # LLM が出した dict (キー順は relations が先)
+        "relations": [{"from": "Alice", "to": "Acme"}],
+        "entities": [{"canonical_name": "Alice"}],
+    }
+    tokens = _tokenize_chars(content, logprob=-0.5)
+    g = GraphExtraction(
+        entities=[EntityExtraction(proposed_type="person", canonical_name="Alice")],
+        relations=[RelationExtraction.model_validate({
+            "proposed_junction": "employment", "from": "Alice", "to": "Acme",
+        })],
+    )
+    apply_logprob_confidence(g, content, tokens, raw=raw)
+    # どちらも logprob が見つかること (fallback 0.1 に落ちていない)
+    assert g.entities[0].confidence > 0.1
+    assert g.relations[0].confidence > 0.1
 
 
 def test_apply_logprob_confidence_relation_concatenates_from_to():

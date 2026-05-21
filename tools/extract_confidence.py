@@ -59,25 +59,36 @@ def _token_byte_spans(tokens: list[LogprobToken]) -> list[tuple[int, int]]:
 def _locate_value_span(
     content_bytes: bytes, value: str, cursor: list[int],
 ) -> tuple[int, int] | None:
-    """content_bytes 上で `json.dumps(value)` の両端 `"` を除いた内側 bytes を探す。
+    """content_bytes 上で `"<value>"` (両端 `"` 込み) を探し、内側 bytes 範囲を返す。
 
-    cursor[0] は呼び出し間で共有される前進専用オフセット。entities → relations →
-    weak_relations の順に消費すれば JSON 物理出現順と一致する。
+    両端 `"` を needle に含めることで、別フィールドの値 (evidence 等) の中に
+    raw substring として value が出るケース (例: evidence="...大阪本社が東京...")
+    での誤マッチを排除する。JSON 内で `"<value>"` という連続は基本フィールド
+    境界にしか出ない。
+
+    `ensure_ascii=False` の dump で失敗したら `ensure_ascii=True` (Unicode escape
+    形式 `\\u00e9` 等) でフォールバック。LLM が `\\u00e9` を直接出してくる場合に
+    対応するため。
+
+    cursor[0] は呼び出し間で共有される前進専用オフセット。閉じ `"` の次まで進める。
     """
     if not value:
         return None
-    dumped = json.dumps(value, ensure_ascii=False)
-    if len(dumped) < 2 or dumped[0] != '"' or dumped[-1] != '"':
-        return None
-    needle = dumped[1:-1].encode("utf-8")
-    if not needle:
-        return None
-    idx = content_bytes.find(needle, cursor[0])
-    if idx < 0:
-        return None
-    end = idx + len(needle)
-    cursor[0] = end
-    return (idx, end)
+    for ensure_ascii in (False, True):
+        dumped = json.dumps(value, ensure_ascii=ensure_ascii)
+        if len(dumped) < 2 or dumped[0] != '"' or dumped[-1] != '"':
+            continue
+        quoted = dumped.encode("utf-8")
+        if len(quoted) <= 2:
+            continue
+        idx = content_bytes.find(quoted, cursor[0])
+        if idx < 0:
+            continue
+        inner_start = idx + 1
+        inner_end = idx + len(quoted) - 1
+        cursor[0] = idx + len(quoted)  # 閉じ `"` の次まで進める
+        return (inner_start, inner_end)
+    return None
 
 
 def _tokens_in_span(
@@ -118,15 +129,25 @@ def _collect_confidence(
     return _confidence_from_tokens(collected)
 
 
+_SECTION_KEYS = ("entities", "relations", "weak_relations")
+
+
 def apply_logprob_confidence(
     graph: GraphExtraction,
     content_text: str,
     tokens: list[LogprobToken],
+    *,
+    raw: dict | None = None,
 ) -> GraphExtraction:
     """各 entity / relation / weak_relation の confidence を logprob 由来値に上書き。
 
-    in-place で graph を更新して返す (パイプ流儀)。
-    span 抽出失敗時は FALLBACK_CONFIDENCE。
+    in-place で graph を更新して返す (パイプ流儀)。span 抽出失敗時は
+    FALLBACK_CONFIDENCE。
+
+    `raw` を渡すと dict.keys() の insertion order で section を処理する。
+    これにより LLM が `{"relations": [...], "entities": [...]}` のような順で
+    出力しても、forward-only cursor が物理 JSON 順と一致して破綻しない。
+    raw が無ければ entities → relations → weak_relations の固定順。
     """
     if not content_text or not tokens:
         for e in graph.entities:
@@ -141,18 +162,31 @@ def apply_logprob_confidence(
     byte_spans = _token_byte_spans(tokens)
     cursor: list[int] = [0]  # mutable shared offset
 
-    # JSON 物理順 (entities → relations → weak_relations) に消費する
-    for e in graph.entities:
-        e.confidence = _collect_confidence(
-            [e.canonical_name], content_bytes, byte_spans, tokens, cursor,
-        )
-    for r in graph.relations:
-        r.confidence = _collect_confidence(
-            [r.from_, r.to], content_bytes, byte_spans, tokens, cursor,
-        )
-    for w in graph.weak_relations:
-        w.confidence = _collect_confidence(
-            [w.subject, w.predicate, w.object], content_bytes, byte_spans, tokens, cursor,
-        )
+    if isinstance(raw, dict):
+        order = [k for k in raw.keys() if k in _SECTION_KEYS]
+        # dict に存在しないセクションは末尾に (graph 側に居れば fallback で処理)
+        for k in _SECTION_KEYS:
+            if k not in order:
+                order.append(k)
+    else:
+        order = list(_SECTION_KEYS)
+
+    for section in order:
+        if section == "entities":
+            for e in graph.entities:
+                e.confidence = _collect_confidence(
+                    [e.canonical_name], content_bytes, byte_spans, tokens, cursor,
+                )
+        elif section == "relations":
+            for r in graph.relations:
+                r.confidence = _collect_confidence(
+                    [r.from_, r.to], content_bytes, byte_spans, tokens, cursor,
+                )
+        elif section == "weak_relations":
+            for w in graph.weak_relations:
+                w.confidence = _collect_confidence(
+                    [w.subject, w.predicate, w.object],
+                    content_bytes, byte_spans, tokens, cursor,
+                )
 
     return graph
