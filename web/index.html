@@ -1262,6 +1262,24 @@ function _drawCaseChart(stage, cases, correct){
   _evCaseChart.setOption(opt);
 }
 
+// junction の from/to は schema FK 列順 (manufacturing=product,org など).
+// 矢印表記は意味方向を誤読しやすいので, 各 junction の semantic phrase を別に持つ.
+const JUNCTION_PHRASE={
+  manufacturing:   'manufactured by',
+  employment:      'employed by',
+  org_hierarchy:   'parent of',
+  product_variant: 'parent of',
+  governance:      'governed by',
+  compliance:      'complies with',
+};
+function _relTriple(from, junction, to){
+  const ph=JUNCTION_PHRASE[junction];
+  const phrase=ph
+    ? `<span style="color:var(--accent-dim);font-family:var(--mono);font-size:11px">── ${esc(ph)} ──</span>`
+    : `<span style="color:var(--dim);font-family:var(--mono);font-size:11px">── ${esc(junction)} ──</span>`;
+  return `<b>${esc(from)}</b> ${phrase} <b>${esc(to)}</b>`;
+}
+
 // tools/normalize.py:normalize と等価 (relation/fact のキー比較用)
 const _STRIP_TOKENS=['株式会社','有限会社','合同会社','（株）','(株)','㈱',
   'corporation','inc.','inc','corp.','corp','co.','co','ltd.','ltd','llc','k.k.','kk']
@@ -1319,7 +1337,7 @@ function _renderCorrectSection(c){
     + sect('entities correct', c.entities.correct, x=>
         `<div class="row"><b>${esc(x.name)}</b><span>${esc(x.type||'')}</span></div>`)
     + sect('relations correct', c.relations.correct, x=>
-        `<div class="row"><b>${esc(x.from)} → ${esc(x.junction)} → ${esc(x.to)}</b><span></span></div>`)
+        `<div class="row">${_relTriple(x.from, x.junction, x.to)}<span></span></div>`)
     + sect('facts correct', c.facts.correct, x=>
         `<div class="row"><b>${esc(x.entity)}.${esc(x.column)}</b><span>${esc(x.value)}</span></div>`);
 }
@@ -1500,10 +1518,21 @@ function renderCasesQuery(cases){
 function renderCasesExtract(cases){
   const rows=cases.map(c=>{
     const item={...c}; delete item.label; delete item.category; delete item.kind;
+    let itemHtml;
+    if(c.category==='relations' && c.proposed_junction){
+      itemHtml=_relTriple(c.from||'?', c.proposed_junction, c.to||'?');
+    } else if(c.category==='facts' && c.entity){
+      itemHtml=`<b>${esc(c.entity)}</b>.<span style="color:var(--accent-dim)">${esc(c.column||'?')}</span> = <b>${esc(c.value||'?')}</b>`;
+    } else if(c.category==='entities' && c.canonical_name){
+      const al=c.aliases&&c.aliases.length?` <span style="color:var(--faint);font-size:10px">[${c.aliases.map(esc).join(' / ')}]</span>`:'';
+      itemHtml=`<b>${esc(c.canonical_name)}</b> <span style="color:var(--dim)">(${esc(c.proposed_type||'?')})</span>${al}`;
+    } else {
+      itemHtml=esc(JSON.stringify(item));
+    }
     return `<tr class="case ${c.kind==='missed'?'bad':''}" data-json="${esc(JSON.stringify(c))}">
       <td>${esc(c.category||'-')}</td>
       <td>${c.kind?gloss(c.kind):'-'}</td>
-      <td>${esc(JSON.stringify(item))}</td>
+      <td>${itemHtml}</td>
     </tr>`;
   }).join('');
   return `<table><tr><th>category</th><th>kind</th><th>item</th></tr>${rows}</table>`;
