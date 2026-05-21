@@ -11,40 +11,48 @@ qa:
   - q: "アクメ株式会社の CEO は誰？"
     expected_row_contains:
       - {value: "山田"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === employment 経由 (Acme alias 解決) ===
   - q: "アクメの CTO は誰？"
     expected_row_contains:
       - {value: "鈴木"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === manufacturing (主力製品の製造元) ===
   - q: "SmartScan を作っているのは？"
     expected_row_contains:
       - {value: "アクメ"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === organization canonical 列 range/比較 ===
   - q: "本社が東京都にある会社は？"
     expected_row_contains:
       - {value: "アクメ"}
+    expected_doc_slugs: ["acme-overview"]
 
   - q: "2015 年以降に設立された会社は？"
     expected_row_contains:
       - {value: "アクメ"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === org_hierarchy ===
   - q: "アクメ株式会社の親会社は？"
     expected_row_contains:
       - {value: "グローバルテック"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === count ===
   - q: "登録されている person の数は？"
     expected_row_contains:
       - {value: "2"}
+    expected_doc_slugs: ["acme-overview"]
 
   # === claims 履歴 (linter R2 例) ===
   - q: "山田 太郎の役職の履歴は？"
     expected_row_contains:
       - {value: "CEO"}
+    expected_doc_slugs: ["acme-overview"]
 
 schema_proposals:
   # 「業務提携」「共同推進」は weak_relations に積まれ、N>=5 で proposal 化される想定。
