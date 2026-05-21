@@ -16,7 +16,7 @@ from tools.eval.metrics import PRF, aggregate
 def _run_once(body: str):
     """typed extract: returns GraphExtraction with entities/relations/weak_relations."""
     chunks = ingest.semantic_chunk(body, config.CHUNK_CHARS)
-    g = ingest.extract_graph_from_chunks(chunks)
+    g = ingest.extract_graph_from_chunks(chunks, source_body=body)
     ents = [e.model_dump(by_alias=True) for e in g.entities]
     rels = [r.model_dump(by_alias=True) for r in g.relations]
     weak = [w.model_dump() for w in g.weak_relations]

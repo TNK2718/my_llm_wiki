@@ -131,11 +131,16 @@ def _format_known_entities(known: list[dict]) -> str:
     )
 
 
-def extract_graph_from_chunks(chunks: list[str]) -> GraphExtraction:
+def extract_graph_from_chunks(
+    chunks: list[str], source_body: str | None = None,
+) -> GraphExtraction:
+    from extract_postprocess import ground_and_dedup
+
     tmpl = load_prompt("extract_graph.txt")
+    body = source_body if source_body is not None else "\n\n".join(chunks)
     if len(chunks) == 1:
         prompt = tmpl.replace("{KNOWN_ENTITIES}", "").replace("{CONTENT}", chunks[0])
-        return parse_extraction(llm.ask_json(prompt))
+        return ground_and_dedup(parse_extraction(llm.ask_json(prompt)), body)
 
     merged = GraphExtraction()
     seen_names: set[str] = set()
@@ -155,7 +160,7 @@ def extract_graph_from_chunks(chunks: list[str]) -> GraphExtraction:
         merged.entities.extend(part.entities)
         merged.relations.extend(part.relations)
         merged.weak_relations.extend(part.weak_relations)
-    return merged
+    return ground_and_dedup(merged, body)
 
 
 # ---------- resolve ----------
@@ -656,7 +661,7 @@ def ingest_file(path: str) -> dict:
     print(f"[1] semantic chunking: {src.name} → {len(chunks)} chunk(s)")
 
     print("[2] typed extract")
-    g = extract_graph_from_chunks(chunks)
+    g = extract_graph_from_chunks(chunks, source_body=body)
     print(f"  entities={len(g.entities)} relations={len(g.relations)} weak={len(g.weak_relations)}")
 
     db = kg.connect()
