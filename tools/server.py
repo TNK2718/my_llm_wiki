@@ -54,10 +54,14 @@ def stats():
 
 
 # ---------- 型別 entity 一覧 / 詳細 ----------
+# 注: 2 セグメント catch-all `/api/{table}/{eid}` は他のルートを誤捕獲しがち
+#   (例 `/api/eval/runs` を table='eval', eid='runs' として捕まえる)。FastAPI/
+#   Starlette は path regex を直接サポートしないので、(a) 具体的ルートを先に登録、
+#   (b) catch-all ハンドラ内で ENTITY_TABLES 外を 404 返却、の 2 段で防ぐ。
 @app.get("/api/{table}/list")
 def entity_list(table: str, q: str = ""):
     if table not in kg.ENTITY_TABLES:
-        return JSONResponse({"error": "unknown table"}, status_code=400)
+        return JSONResponse({"error": "unknown table"}, status_code=404)
     db = ro()
     sql = f"SELECT id, canonical_name FROM {table}"
     args: list = []
@@ -68,10 +72,10 @@ def entity_list(table: str, q: str = ""):
     return [dict(r) for r in db.execute(sql, args)]
 
 
-@app.get("/api/{table}/{eid}")
+@app.get("/api/{table}/{eid:int}")
 def entity_detail(table: str, eid: int):
     if table not in kg.ENTITY_TABLES:
-        return JSONResponse({"error": "unknown table"}, status_code=400)
+        return JSONResponse({"error": "unknown table"}, status_code=404)
     db = ro()
     e = db.execute(f"SELECT * FROM {table} WHERE id=?", (eid,)).fetchone()
     if not e:
@@ -359,6 +363,13 @@ def _headline(stage: str, agg: dict) -> tuple[dict, float | None]:
         vals = {"ent_f1": g("entities_f1"), "rel_f1": g("relations_f1"), "fact_f1": g("facts_f1")}
     elif stage == "dedup":
         vals = {"acc": g("accuracy"), "f1": g("f1"), "lvl": g("level_match_rate")}
+    elif stage == "proposal":
+        vals = {
+            "prop_f1":  g("proposal_f1"),
+            "stage_f1": g("staging_f1"),
+            "weak_r":   g("weak_promotion_recall"),
+            "stab":     g("canonical_stability_passed"),
+        }
     else:
         vals = {k[:-5]: v for k, v in agg.items() if k.endswith("_mean")}
     nums = [v for v in vals.values() if isinstance(v, (int, float))]

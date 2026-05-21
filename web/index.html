@@ -608,7 +608,7 @@ document.body.insertAdjacentHTML('beforeend','<div id="glosstip"></div>');
 
 async function loadEvalRuns(){
   evRuns=await api('/api/eval/runs');
-  const stages=['all','query','extract','dedup'];
+  const stages=['all','extract','dedup','query','proposal'];
   $('#evfilters').innerHTML=stages.map(s=>
     `<span class="f ${s===evStage?'on':''}" data-s="${s}">${s}</span>`).join('');
   document.querySelectorAll('#evfilters .f').forEach(f=>f.onclick=()=>{
