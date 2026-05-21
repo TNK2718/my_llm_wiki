@@ -558,6 +558,37 @@ def eval_runs():
     return items
 
 
+_GOLD_SUBDIR = {
+    "extract": "extract",
+    "dedup": "dedup",
+    "query": "query",
+    "proposal": "schema_proposals",
+}
+
+
+@app.get("/api/eval/gold/{stage}/{filename}")
+def eval_gold(stage: str, filename: str):
+    """gold YAML を JSON 化して返す (per-case と突き合わせて correct 推定するため)."""
+    sub = _GOLD_SUBDIR.get(stage)
+    if not sub:
+        return JSONResponse({"error": "unknown stage"}, status_code=404)
+    if not filename.endswith((".yml", ".yaml")) or Path(filename).name != filename:
+        return JSONResponse({"error": "invalid filename"}, status_code=400)
+    gold_root = (config.ROOT / "data" / "eval" / "gold" / sub).resolve()
+    target = (gold_root / filename).resolve()
+    try:
+        inside = target.is_relative_to(gold_root)
+    except AttributeError:
+        inside = str(target).startswith(str(gold_root))
+    if not inside or not target.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        import yaml
+        return yaml.safe_load(target.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/eval/run/{filename}")
 def eval_run(filename: str):
     if not filename.endswith(".json") or Path(filename).name != filename:

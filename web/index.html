@@ -245,6 +245,12 @@
     text-transform:uppercase;color:var(--accent-dim);border-bottom:1px solid var(--line);padding-bottom:4px}
   .ent-graph{height:280px;border:1px solid var(--line);background:
     radial-gradient(circle at 50% 50%,#0e120e,#090b09);margin-top:10px}
+  /* Eval viz */
+  .ev-charts{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+  .ev-chart{height:200px;border:1px solid var(--line);background:var(--panel2)}
+  .ev-chart-wide{height:140px;border:1px solid var(--line);background:var(--panel2);margin:10px 0}
+  .step .timebar{display:inline-block;height:5px;background:var(--accent-dim);
+    margin-left:6px;vertical-align:middle;border:1px solid var(--line);max-width:120px}
 </style>
 </head>
 <body>
@@ -1081,6 +1087,243 @@ function renderEvalList(){
   });
 }
 
+let _evTrendChart=null, _evRadarChart=null, _evCaseChart=null;
+
+function _evGoldOf(m){ return ((m.gold_path||'').split(/[\\/]/).pop()||'').replace(/\.ya?ml$/,''); }
+
+function _drawTrendChart(stage, goldName){
+  const el=document.getElementById('ev-trend');
+  if(!el) return;
+  const matched=evRuns
+    .filter(r=>!r.error && r.meta && r.meta.stage===stage
+      && _evGoldOf(r.meta)===goldName && typeof r.score==='number')
+    .sort((a,b)=>(a.meta.timestamp_utc||'').localeCompare(b.meta.timestamp_utc||''))
+    .slice(-30);
+  if(matched.length<2){
+    el.innerHTML='<div class="empty" style="padding:50px 0">同条件 (stage + gold) の過去 run が 2 件未満のため trend 表示なし</div>';
+    return;
+  }
+  if(_evTrendChart){ _evTrendChart.dispose(); }
+  _evTrendChart=echarts.init(el,null,{renderer:'canvas'});
+  const points=matched.map(r=>({
+    value:[(r.meta.timestamp_utc||'').slice(0,19).replace('T',' '), r.score],
+    filename:r.filename, tag:r.meta.tag||'', score:r.score,
+  }));
+  _evTrendChart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'item', formatter:p=>
+      `<b>${p.data.tag||'-'}</b><br>${p.data.value[0]}<br>score=${(+p.data.score).toFixed(3)}`},
+    grid:{left:40,right:18,top:22,bottom:46,containLabel:true},
+    xAxis:{type:'category', data:points.map(p=>p.value[0]),
+      axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:9,rotate:25,
+        interval:Math.max(0,Math.floor(points.length/8))},
+      axisLine:{lineStyle:{color:'#1f261f'}}, axisTick:{show:false}},
+    yAxis:{type:'value', min:0, max:1,
+      axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10,formatter:v=>v.toFixed(1)},
+      splitLine:{lineStyle:{color:'#1f261f'}},
+      axisLine:{lineStyle:{color:'#1f261f'}}},
+    series:[{
+      type:'line', smooth:false, symbolSize:8,
+      lineStyle:{color:'#7d9430', width:1.5},
+      itemStyle:{color:p=>{const v=p.data.score;
+        return v>=0.9?'#4dd28c':v>=0.7?'#c4f24a':v>=0.5?'#e0a64a':'#ff5468';}},
+      data:points,
+    }],
+  });
+  _evTrendChart.off('click');
+  _evTrendChart.on('click', p=>{
+    const fn=p.data && p.data.filename;
+    if(!fn) return;
+    evSelected=fn;
+    document.querySelectorAll('#evlist .item').forEach(it=>
+      it.classList.toggle('on', it.dataset.f===fn));
+    showEvalRun(fn);
+  });
+}
+
+function _drawRadar(stage, agg){
+  const el=document.getElementById('ev-radar');
+  if(!el) return;
+  let keys=[];
+  if(stage==='dedup'){
+    keys=['accuracy','precision','recall','f1','level_match_rate'];
+  } else if(stage==='extract'){
+    keys=['entities_precision','entities_recall','entities_f1',
+          'relations_precision','relations_recall','relations_f1',
+          'facts_precision','facts_recall','facts_f1'];
+  } else if(stage==='query'){
+    keys=['sql_success_rate','row_contains_rate','doc_slug_rate'];
+  } else {
+    keys=Object.keys(agg).filter(k=>k.endsWith('_mean')).map(k=>k.slice(0,-5)).slice(0,9);
+  }
+  keys=keys.filter(k=>typeof agg[k+'_mean']==='number');
+  if(keys.length<3){
+    el.innerHTML='<div class="empty" style="padding:60px 0">radar には 3 メトリクス必要</div>';
+    return;
+  }
+  if(_evRadarChart){ _evRadarChart.dispose(); }
+  _evRadarChart=echarts.init(el,null,{renderer:'canvas'});
+  _evRadarChart.setOption({
+    backgroundColor:'transparent',
+    tooltip:{trigger:'item'},
+    radar:{indicator:keys.map(k=>({name:k,max:1})), splitNumber:4, shape:'polygon',
+      center:['50%','55%'], radius:'68%',
+      name:{textStyle:{color:'#dfe6da',fontFamily:'IBM Plex Mono',fontSize:9}},
+      splitLine:{lineStyle:{color:'#1f261f'}},
+      splitArea:{areaStyle:{color:['rgba(15,17,15,0.4)','rgba(20,24,20,0.4)']}},
+      axisLine:{lineStyle:{color:'#1f261f'}}},
+    series:[{type:'radar', data:[{
+      value:keys.map(k=>Math.max(0,Math.min(1,+agg[k+'_mean']||0))), name:'mean',
+      areaStyle:{color:'rgba(196,242,74,0.18)'},
+      lineStyle:{color:'#c4f24a',width:1.5},
+      itemStyle:{color:'#c4f24a'}}]}]
+  });
+}
+
+function _drawCaseChart(stage, cases, correct){
+  const el=document.getElementById('ev-cases-chart');
+  if(!el) return;
+  if(!cases.length && !correct){ el.style.display='none'; return; }
+  if(_evCaseChart){ _evCaseChart.dispose(); }
+  _evCaseChart=echarts.init(el,null,{renderer:'canvas'});
+  let opt=null;
+  if(stage==='extract'){
+    const bucket={};
+    cases.forEach(c=>{
+      const cat=c.category||'other';
+      bucket[cat]=bucket[cat]||{missed:0, extra:0};
+      if(c.kind==='missed') bucket[cat].missed++;
+      else if(c.kind==='extra') bucket[cat].extra++;
+    });
+    // correct があれば bucket をマージ
+    const cats=correct
+      ? ['entities','relations','facts']
+      : Object.keys(bucket);
+    cats.forEach(c=>{ bucket[c]=bucket[c]||{missed:0, extra:0}; });
+    opt={
+      backgroundColor:'transparent',
+      tooltip:{trigger:'axis', axisPointer:{type:'shadow'}},
+      legend:{textStyle:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},top:4,right:10},
+      grid:{left:24,right:18,top:30,bottom:24,containLabel:true},
+      xAxis:{type:'category', data:cats,
+        axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},
+        axisLine:{lineStyle:{color:'#1f261f'}}, axisTick:{show:false}},
+      yAxis:{type:'value', minInterval:1,
+        axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},
+        splitLine:{lineStyle:{color:'#1f261f'}}, axisLine:{lineStyle:{color:'#1f261f'}}},
+      series:[
+        ...(correct?[{name:'correct', type:'bar', stack:'x', itemStyle:{color:'#4dd28c'},
+          data:cats.map(c=>(correct[c]&&correct[c].correct.length)||0)}]:[]),
+        {name:'missed', type:'bar', stack:'x', itemStyle:{color:'#ff5468'},
+          data:cats.map(c=>bucket[c].missed)},
+        {name:'extra', type:'bar', stack:'x', itemStyle:{color:'#e0a64a'},
+          data:cats.map(c=>bucket[c].extra)},
+      ],
+    };
+  } else if(stage==='dedup'){
+    let correct=0, incorrect=0;
+    cases.forEach(c=>{ if(c.correct) correct++; else incorrect++; });
+    opt={
+      backgroundColor:'transparent',
+      tooltip:{trigger:'item'},
+      legend:{textStyle:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},
+        top:'center',right:10,orient:'vertical'},
+      series:[{type:'pie', radius:['40%','72%'], center:['38%','55%'],
+        label:{color:'#dfe6da',fontFamily:'IBM Plex Mono',fontSize:10,
+          formatter:'{b}\n{c}'},
+        data:[
+          {value:correct, name:'correct', itemStyle:{color:'#4dd28c'}},
+          {value:incorrect, name:'incorrect', itemStyle:{color:'#ff5468'}},
+        ]}]
+    };
+  } else if(stage==='query'){
+    const tot=cases.length;
+    const sqlOk=cases.filter(c=>c.sql_ok===true).length/Math.max(1,tot);
+    const rowAvg=cases.map(c=>c.row_contains_rate||0).reduce((a,b)=>a+b,0)/Math.max(1,tot);
+    const docAvg=cases.map(c=>c.doc_slug_rate||0).reduce((a,b)=>a+b,0)/Math.max(1,tot);
+    opt={
+      backgroundColor:'transparent',
+      tooltip:{trigger:'axis', axisPointer:{type:'shadow'}, valueFormatter:v=>(+v).toFixed(2)},
+      grid:{left:24,right:24,top:22,bottom:24,containLabel:true},
+      xAxis:{type:'category', data:['sql_ok','row_contains','doc_slug'],
+        axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},
+        axisLine:{lineStyle:{color:'#1f261f'}}, axisTick:{show:false}},
+      yAxis:{type:'value', min:0, max:1,
+        axisLabel:{color:'#7f8a78',fontFamily:'IBM Plex Mono',fontSize:10},
+        splitLine:{lineStyle:{color:'#1f261f'}}, axisLine:{lineStyle:{color:'#1f261f'}}},
+      series:[{type:'bar', data:[sqlOk, rowAvg, docAvg], itemStyle:{color:'#7d9430'},
+        label:{show:true,position:'top',color:'#dfe6da',fontFamily:'IBM Plex Mono',
+          fontSize:10,formatter:p=>p.value.toFixed(2)}}],
+    };
+  } else {
+    el.style.display='none';
+    return;
+  }
+  _evCaseChart.setOption(opt);
+}
+
+// tools/normalize.py:normalize と等価 (relation/fact のキー比較用)
+const _STRIP_TOKENS=['株式会社','有限会社','合同会社','（株）','(株)','㈱',
+  'corporation','inc.','inc','corp.','corp','co.','co','ltd.','ltd','llc','k.k.','kk']
+  .sort((a,b)=>b.length-a.length);
+function _norm(s){
+  let v=String(s||'').normalize('NFKC').toLowerCase().trim();
+  for(const t of _STRIP_TOKENS){ v=v.split(t.toLowerCase()).join(''); }
+  return v.replace(/[\s　_,.\-・()（）]+/g,'');
+}
+
+function _computeCorrectExtract(gold, cases){
+  // missed の集合 (run をまたいで union)。matchers.py に従い relations/facts は normalize 済キー.
+  const ent=new Set(), rel=new Set(), fact=new Set();
+  cases.forEach(c=>{
+    if(c.kind!=='missed') return;
+    if(c.category==='entities')  ent.add(c.canonical_name);
+    if(c.category==='relations') rel.add(`${c.proposed_junction}|${c.from}|${c.to}`);
+    if(c.category==='facts')     fact.add(`${c.entity}|${c.column}|${c.value}`);
+  });
+  const out={entities:{correct:[],total:0}, relations:{correct:[],total:0}, facts:{correct:[],total:0}};
+  (gold.entities||[]).forEach(e=>{
+    out.entities.total++;
+    if(!ent.has(e.canonical_name))
+      out.entities.correct.push({name:e.canonical_name, type:e.proposed_type});
+  });
+  (gold.relations||[]).forEach(r=>{
+    out.relations.total++;
+    const key=`${r.proposed_junction}|${_norm(r.from)}|${_norm(r.to)}`;
+    if(!rel.has(key))
+      out.relations.correct.push({junction:r.proposed_junction, from:r.from, to:r.to});
+  });
+  (gold.entities||[]).forEach(e=>{
+    Object.entries(e.attributes||{}).forEach(([col,val])=>{
+      if(val==null || val==='') return;
+      out.facts.total++;
+      const key=`${_norm(e.canonical_name)}|${col}|${_norm(val)}`;
+      if(!fact.has(key))
+        out.facts.correct.push({entity:e.canonical_name, column:col, value:String(val)});
+    });
+  });
+  return out;
+}
+
+function _renderCorrectSection(c){
+  const sect=(label, items, fmt)=>!items.length?'':`
+    <details style="margin:4px 0"><summary style="cursor:pointer;font-family:var(--mono);font-size:11px;color:#4dd28c">✓ ${esc(label)} (${items.length})</summary>
+    <div style="padding:6px 12px;border-left:2px solid #4dd28c;background:rgba(77,210,140,.05);margin:4px 0">
+    ${items.map(fmt).join('')}</div></details>`;
+  const totals=`<div style="font-family:var(--mono);font-size:11px;color:var(--dim);margin:8px 0 4px">
+    correct / total — entities <b style="color:#4dd28c">${c.entities.correct.length}/${c.entities.total}</b>
+    · relations <b style="color:#4dd28c">${c.relations.correct.length}/${c.relations.total}</b>
+    · facts <b style="color:#4dd28c">${c.facts.correct.length}/${c.facts.total}</b>
+    <span style="color:var(--faint);margin-left:6px">(全 run で 1 度も missed されなかった項目)</span></div>`;
+  return totals
+    + sect('entities correct', c.entities.correct, x=>
+        `<div class="row"><b>${esc(x.name)}</b><span>${esc(x.type||'')}</span></div>`)
+    + sect('relations correct', c.relations.correct, x=>
+        `<div class="row"><b>${esc(x.from)} → ${esc(x.junction)} → ${esc(x.to)}</b><span></span></div>`)
+    + sect('facts correct', c.facts.correct, x=>
+        `<div class="row"><b>${esc(x.entity)}.${esc(x.column)}</b><span>${esc(x.value)}</span></div>`);
+}
+
 async function showEvalRun(filename){
   const data=await api('/api/eval/run/'+encodeURIComponent(filename));
   if(data.error){ $('#evdetail').innerHTML=`<div class="err">${esc(data.error)}</div>`; return; }
@@ -1088,7 +1331,16 @@ async function showEvalRun(filename){
   const gs=res.gold_summary||{}, agg=res.aggregate||{}, cases=res.per_case||[];
   const stage=m.stage||'unknown';
 
-  const goldName=(m.gold_path||'').split(/[\\/]/).pop()||'-';
+  const goldName=_evGoldOf(m);
+  const goldBase=(m.gold_path||'').split(/[\\/]/).pop()||'';
+  // extract のみ gold YAML を取得 (correct 集合の導出に使用)
+  let goldData=null, correct=null;
+  if(stage==='extract' && goldBase){
+    try{
+      goldData=await api(`/api/eval/gold/${encodeURIComponent(stage)}/${encodeURIComponent(goldBase)}`);
+      if(goldData && !goldData.error) correct=_computeCorrectExtract(goldData, cases);
+    }catch(_){}
+  }
   const gitShort=(m.git_rev||'').slice(0,7);
   const chips=[
     ['stage',stage],['tag',m.tag],['model',m.model],['runs',m.runs],
@@ -1111,10 +1363,23 @@ async function showEvalRun(filename){
 
   $('#evdetail').innerHTML=
     `<div class="ev-meta">${chips}</div>
+     <div class="sect">Trend (this stage × gold)</div>
+     <div id="ev-trend" class="ev-chart-wide"></div>
      <div class="sect">Gold summary</div>${goldRow}
-     <div class="sect">Aggregate</div>${aggHtml}
+     <div class="sect">Aggregate</div>
+     <div class="ev-charts">
+       <div id="ev-radar" class="ev-chart"></div>
+       <div class="ev-chart" style="padding:10px 14px;overflow:auto">${aggHtml}</div>
+     </div>
      ${runTraceHtml}
-     <div class="sect">Per-case (${cases.length})</div>${caseHtml}`;
+     <div class="sect">Per-case (${cases.length})</div>
+     <div id="ev-cases-chart" class="ev-chart-wide"></div>
+     ${correct?_renderCorrectSection(correct):''}
+     ${caseHtml}`;
+
+  _drawTrendChart(stage, goldName);
+  _drawRadar(stage, agg);
+  _drawCaseChart(stage, cases, correct);
 
   // 行クリックで詳細展開: trace タイムライン + raw JSON (折りたたみ)
   document.querySelectorAll('#evdetail tr.case').forEach(tr=>tr.onclick=()=>{
@@ -1136,15 +1401,20 @@ function renderTrace(trace){
   // 旧 run 互換: 廃止された route.* ステップは表示しない。
   const filtered=trace.filter(e=>!String(e.kind||'').startsWith('route.'));
   if(!filtered.length) return '<div class="empty">trace 無し</div>';
-  return '<div class="trace">'+filtered.map(renderStep).join('')+'</div>';
+  const maxMs=Math.max(1, ...filtered.map(e=>+e.elapsed_ms||0));
+  return '<div class="trace">'+filtered.map(e=>renderStep(e,maxMs)).join('')+'</div>';
 }
 
-function renderStep(e){
+function renderStep(e, maxMs){
   const kind=e.kind||'step';
   const isLLM=kind.startsWith('llm.');
   const hasErr=!!e.error;
   const cls=hasErr?'err':(isLLM?'llm':'');
-  const elapsed=(e.elapsed_ms!=null)?`<span class="dim">${e.elapsed_ms}ms</span>`:'';
+  let elapsed='';
+  if(e.elapsed_ms!=null){
+    const w=Math.max(2, Math.round((+e.elapsed_ms)/(maxMs||1)*120));
+    elapsed=`<span class="dim">${e.elapsed_ms}ms</span><span class="timebar" style="width:${w}px"></span>`;
+  }
   const skip=new Set(['kind','t_ms','prompt','response','elapsed_ms']);
   // 「長い / 複数行」の値は inline の dim ではなく pre ブロックに分離して表示
   const inlineParts=[], blockParts=[];
