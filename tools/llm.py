@@ -3,9 +3,14 @@
 trace_session() を with でくくると、その文脈で発生した ask()/embed() 呼び出しと
 note() で記録した中間ステップを 1 本のタイムラインとして配列に集約する。
 本番経路（server.py / CLI）からは使われない → 性能・挙動への影響なし。
+
+stream_session(emit) を with でくくると、同じイベントが emit(dict) でも逐次配信される。
+さらに ask() は Ollama を stream=True で叩き、llm.ask.start / llm.delta を emit する。
+非 stream session 下では完全に従来挙動。
 """
 import json
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -14,6 +19,10 @@ import config
 
 
 _trace: ContextVar[list | None] = ContextVar("_llm_trace", default=None)
+_stream_emit: ContextVar[Callable[[dict], None] | None] = ContextVar(
+    "_llm_stream_emit", default=None
+)
+_ask_purpose: ContextVar[str] = ContextVar("_llm_ask_purpose", default="")
 
 
 @contextmanager
@@ -27,21 +36,57 @@ def trace_session():
         _trace.reset(token)
 
 
+@contextmanager
+def stream_session(emit: Callable[[dict], None]):
+    """note()/_record_llm()/ask() の chunk を emit(dict) でリアルタイム配信。
+
+    SSE エンドポイントが worker thread 内でこれを set して使う。
+    ContextVar はスレッドローカルなので必ず worker thread の中で with すること。
+    """
+    token = _stream_emit.set(emit)
+    try:
+        yield
+    finally:
+        _stream_emit.reset(token)
+
+
+@contextmanager
+def ask_as(purpose: str):
+    """直後の llm.ask() に「どのステップの呼び出しか」のタグを付ける。
+
+    streaming 時に llm.ask.start / llm.delta / llm.ask の purpose フィールドに反映され、
+    frontend がこの purpose をキーに「どのカードに token を流すか」を決める。
+    非 streaming 時は no-op。
+    """
+    token = _ask_purpose.set(purpose)
+    try:
+        yield
+    finally:
+        _ask_purpose.reset(token)
+
+
+def _emit(ev: dict) -> None:
+    cb = _stream_emit.get()
+    if cb is None:
+        return
+    try:
+        cb(ev)
+    except Exception:  # noqa: BLE001 — UI 配信失敗で本処理を壊さない
+        pass
+
+
 def note(kind: str, **data) -> None:
     """構造化ステップを trace に追加。session 外なら no-op。"""
-    sink = _trace.get()
-    if sink is None:
-        return
     entry = {"kind": kind, "t_ms": int(time.time() * 1000)}
     entry.update(data)
-    sink.append(entry)
+    sink = _trace.get()
+    if sink is not None:
+        sink.append(entry)
+    _emit(entry)
 
 
 def _record_llm(kind: str, prompt: str, response: str | None, model: str,
                 elapsed_ms: int, error: str | None = None, **extra) -> None:
-    sink = _trace.get()
-    if sink is None:
-        return
     entry = {
         "kind": kind,
         "t_ms": int(time.time() * 1000),
@@ -53,22 +98,88 @@ def _record_llm(kind: str, prompt: str, response: str | None, model: str,
     if error is not None:
         entry["error"] = error
     entry.update(extra)
-    sink.append(entry)
+    sink = _trace.get()
+    if sink is not None:
+        sink.append(entry)
+    _emit(entry)
 
 
 def ask(prompt: str, system: str = "", temperature: float | None = None) -> str:
-    """Ollama /api/generate を1回叩いて文字列を返す。1コール1タスクが原則。"""
+    """Ollama /api/generate を1回叩いて文字列を返す。1コール1タスクが原則。
+
+    stream_session() が active のときだけ Ollama を stream=True で叩き、chunk ごとに
+    llm.delta を emit する。戻り値の文字列は両モードで同じ。
+    """
+    temp = config.TEMPERATURE if temperature is None else temperature
+    purpose = _ask_purpose.get()
+    streaming = _stream_emit.get() is not None
     payload = {
         "model": config.MODEL,
         "prompt": prompt,
         "system": system,
-        "stream": False,
+        "stream": streaming,
         "options": {
-            "temperature": config.TEMPERATURE if temperature is None else temperature,
+            "temperature": temp,
             "num_ctx": config.NUM_CTX,
         },
     }
     t0 = time.time()
+    if streaming:
+        _emit({
+            "kind": "llm.ask.start",
+            "t_ms": int(time.time() * 1000),
+            "model": config.MODEL,
+            "purpose": purpose,
+        })
+        parts: list[str] = []
+        try:
+            with requests.post(
+                config.OLLAMA_URL, json=payload, timeout=600, stream=True
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines(decode_unicode=False):
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = chunk.get("response", "")
+                    if delta:
+                        parts.append(delta)
+                        _emit({
+                            "kind": "llm.delta",
+                            "t_ms": int(time.time() * 1000),
+                            "delta": delta,
+                            "purpose": purpose,
+                        })
+                    if chunk.get("done"):
+                        break
+            out = "".join(parts).strip()
+            _record_llm(
+                "llm.ask", prompt, out, config.MODEL,
+                int((time.time() - t0) * 1000),
+                system=system or None,
+                temperature=temp,
+                purpose=purpose or None,
+            )
+            return out
+        except Exception as e:  # noqa: BLE001
+            _emit({
+                "kind": "llm.error",
+                "t_ms": int(time.time() * 1000),
+                "purpose": purpose,
+                "error": f"{type(e).__name__}: {e}",
+            })
+            _record_llm(
+                "llm.ask", prompt, None, config.MODEL,
+                int((time.time() - t0) * 1000),
+                error=f"{type(e).__name__}: {e}",
+                system=system or None,
+                temperature=temp,
+                purpose=purpose or None,
+            )
+            raise
     try:
         r = requests.post(config.OLLAMA_URL, json=payload, timeout=600)
         r.raise_for_status()
@@ -77,7 +188,7 @@ def ask(prompt: str, system: str = "", temperature: float | None = None) -> str:
             "llm.ask", prompt, out, config.MODEL,
             int((time.time() - t0) * 1000),
             system=system or None,
-            temperature=payload["options"]["temperature"],
+            temperature=temp,
         )
         return out
     except Exception as e:  # noqa: BLE001
@@ -86,7 +197,7 @@ def ask(prompt: str, system: str = "", temperature: float | None = None) -> str:
             int((time.time() - t0) * 1000),
             error=f"{type(e).__name__}: {e}",
             system=system or None,
-            temperature=payload["options"]["temperature"],
+            temperature=temp,
         )
         raise
 

@@ -155,7 +155,8 @@ def text2sql(question: str):
     3) それでも失敗なら呼び出し元で FTS fallback。
     """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
-    sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+    with llm.ask_as("text2sql/attempt1"):
+        sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
     llm.note("text2sql.sql_raw", sql=sql_raw)
 
     sql, rows, err = None, None, None
@@ -193,12 +194,13 @@ def text2sql(question: str):
             raise err
         return sql, rows  # rows == [] 確定
 
-    fix = llm.ask(
-        tmpl.replace("{QUESTION}", question)
-        + err_block
-        + (f"\n{hints}" if hints else "")
-        + "\n修正後の SQL のみ:"
-    )
+    with llm.ask_as("text2sql/attempt2"):
+        fix = llm.ask(
+            tmpl.replace("{QUESTION}", question)
+            + err_block
+            + (f"\n{hints}" if hints else "")
+            + "\n修正後の SQL のみ:"
+        )
     llm.note("text2sql.sql_raw", attempt=2, sql=fix)
     try:
         sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())
@@ -328,7 +330,8 @@ def answer_question(question: str) -> dict:
             .replace("{ROWS}", str(rows)[:4000] or "(なし)")
             .replace("{DOCS}", "\n".join(f"({d['slug']}) {d['snippet']}" for d in docs) or "(なし)")
         )
-        answer = llm.ask(prompt)
+        with llm.ask_as("answer"):
+            answer = llm.ask(prompt)
     except Exception as e:  # noqa: BLE001
         error = (error + " / " if error else "") + f"回答生成失敗: {e}"
         llm.note("answer.failed", error=str(e))

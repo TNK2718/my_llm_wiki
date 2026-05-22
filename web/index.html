@@ -251,6 +251,47 @@
   .ev-chart-wide{height:140px;border:1px solid var(--line);background:var(--panel2);margin:10px 0}
   .step .timebar{display:inline-block;height:5px;background:var(--accent-dim);
     margin-left:6px;vertical-align:middle;border:1px solid var(--line);max-width:120px}
+  /* Ask streaming timeline */
+  .ask-timeline{display:flex;flex-direction:column;gap:6px;margin-top:14px}
+  .ask-timeline .step.running{animation:askpulse 1.2s ease-in-out infinite}
+  @keyframes askpulse{
+    0%,100%{box-shadow:inset 2px 0 0 #5ec8ff}
+    50%{box-shadow:inset 2px 0 0 transparent}
+  }
+  .ask-timeline .step.done{opacity:1}
+  .ask-timeline .step .purpose{color:var(--dim);font-size:10.5px;margin-left:6px;letter-spacing:.05em}
+  .ask-timeline .step .elapsed{color:var(--faint);font-size:10.5px;margin-left:8px}
+  .ask-timeline .step .llm-stream{margin:6px 0 0;font-family:var(--mono);font-size:11.5px;
+    color:#c9d4bf;background:var(--panel2);border:1px solid var(--line);
+    border-left:2px solid #5ec8ff;padding:8px 10px;max-height:300px;overflow:auto;
+    white-space:pre-wrap;word-break:break-all;min-height:1.4em}
+  .ask-timeline .step .stream-caret{display:inline-block;width:7px;height:13px;
+    background:#5ec8ff;vertical-align:text-bottom;margin-left:1px;animation:caret 1s steps(2) infinite}
+  @keyframes caret{50%{opacity:0}}
+  .ask-timeline .question-head{font-family:var(--sans);font-size:13.5px;color:var(--ink);
+    border-left:2px solid var(--accent);padding:8px 12px;background:var(--panel);margin-bottom:4px}
+  .ask-timeline .question-head .label{font-family:var(--mono);font-size:10.5px;
+    letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-right:10px}
+  .ask-result{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+  .ask-result .ans{font-family:var(--sans);font-size:14px;color:var(--ink);
+    white-space:pre-wrap;margin:6px 0 14px}
+  .ask-result pre.sql{font-family:var(--mono);font-size:11.5px;color:#c9d4bf;
+    background:var(--panel2);border:1px solid var(--line);border-left:2px solid var(--accent-dim);
+    padding:8px 10px;white-space:pre-wrap;word-break:break-all;margin:6px 0}
+  .ask-result .sect{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--accent-dim);margin:14px 0 6px;
+    border-bottom:1px solid var(--line);padding-bottom:4px}
+  .ask-result table{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0}
+  .ask-result table th,.ask-result table td{border:1px solid var(--line);padding:4px 8px;
+    text-align:left;color:var(--ink)}
+  .ask-result table th{background:var(--panel2);color:var(--dim);
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+  .ask-result .row{display:flex;flex-direction:column;gap:2px;padding:6px 10px;
+    margin:4px 0;border:1px solid var(--line);background:var(--panel2);font-size:12px}
+  .ask-result .row b{color:var(--accent);font-family:var(--mono);font-size:11px}
+  .ask-result .meta{margin:6px 0 10px;display:flex;gap:6px}
+  .ask-result .err{color:var(--warn);border:1px solid var(--warn);background:var(--warn-bg);
+    padding:6px 10px;margin:6px 0}
 </style>
 </head>
 <body>
@@ -339,7 +380,8 @@
           <span class="tag" id="askhint">text2sql 生成 → 失敗時は FTS のみで回答</span>
         </div>
       </div>
-      <div id="askout"></div>
+      <div id="asktimeline" class="ask-timeline"></div>
+      <div id="askresult" class="ask-result" style="display:none"></div>
     </section>
   </main>
 </div>
@@ -902,25 +944,207 @@ async function promoteWeak(predicate){
   loadWeak();
 }
 
-$('#run').onclick=async()=>{
-  const q=$('#q').value.trim(); if(!q)return;
-  $('#askout').innerHTML='<div class="empty">問い合わせ中…（要約/抽出/回答に時間がかかる場合があります）</div>';
-  let r;
-  try{ r=await fetch('/api/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({question:q})}).then(x=>x.json()); }
-  catch(e){ $('#askout').innerHTML='<div class="err">サーバ通信失敗</div>'; return; }
+let _askAbort=null;
+const _escHtml=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function renderAskResult(r){
+  const target=$('#askresult');
   let h='';
-  if(r.error) h+=`<div class="err">⚠ ${r.error}</div>`;
+  if(r.error) h+=`<div class="err">⚠ ${_escHtml(r.error)}</div>`;
   h+=`<div class="meta"><span class="badge">rows: ${(r.rows||[]).length}</span>`+
      `<span class="badge">docs: ${(r.docs||[]).length}</span></div>`;
-  h+=`<div class="ans">${(r.answer||'(回答生成不可 — Ollama 未起動の可能性)').replace(/</g,'&lt;')}</div>`;
-  if(r.sql) h+=`<div class="sect">生成 SQL（read-only 検証済）</div><pre class="sql">${r.sql.replace(/</g,'&lt;')}</pre>`;
+  h+=`<div class="ans">${_escHtml(r.answer||'(回答生成不可 — Ollama 未起動の可能性)')}</div>`;
+  if(r.sql) h+=`<div class="sect">生成 SQL（read-only 検証済）</div><pre class="sql">${_escHtml(r.sql)}</pre>`;
   if(r.rows&&r.rows.length){const k=Object.keys(r.rows[0]);
-    h+='<div class="sect">構造化結果</div><table><tr>'+k.map(x=>`<th>${x}</th>`).join('')+'</tr>'+
-      r.rows.slice(0,40).map(row=>'<tr>'+k.map(x=>`<td>${String(row[x]??'')}</td>`).join('')+'</tr>').join('')+'</table>';}
+    h+='<div class="sect">構造化結果</div><table><tr>'+k.map(x=>`<th>${_escHtml(x)}</th>`).join('')+'</tr>'+
+      r.rows.slice(0,40).map(row=>'<tr>'+k.map(x=>`<td>${_escHtml(row[x]??'')}</td>`).join('')+'</tr>').join('')+'</table>';}
   if(r.docs&&r.docs.length){h+='<div class="sect">関連文書</div>'+
-    r.docs.map(d=>`<div class="row"><b>${d.slug}</b><span>${(d.snippet||'').replace(/</g,'&lt;')}</span></div>`).join('');}
-  $('#askout').innerHTML=h;
+    r.docs.map(d=>`<div class="row"><b>${_escHtml(d.slug)}</b><span>${_escHtml(d.snippet||'')}</span></div>`).join('');}
+  if(r.sql_docs&&r.sql_docs.length){h+='<div class="sect">SQL 行から逆引きした関連文書</div>'+
+    r.sql_docs.map(d=>`<div class="row"><b>${_escHtml(d.slug)}</b><span>${_escHtml((d.entity_table||'')+': '+(d.matched_value||''))}</span></div>`).join('');}
+  target.innerHTML=h;
+  target.style.display='block';
+}
+
+// kind → 日本語ラベル (frontend だけのプレゼン用。backend は kind を変えない)
+const ASK_KIND_LABEL={
+  'question': '質問受付',
+  'text2sql.sql_raw': 'SQL 生成 (raw)',
+  'text2sql.validate': 'SQL 検証 (R1/R2 linter)',
+  'text2sql.run': 'SQL 実行',
+  'text2sql.retry_decision': 'リトライ判定',
+  'text2sql.hints': 'カラムヒント生成',
+  'text2sql.fallback': 'text2sql フォールバック',
+  'fts.docs': 'FTS 文書検索',
+  'sql.docs': '行から関連文書を逆引き',
+  'answer.failed': '回答生成失敗',
+  'llm.ask': 'LLM 呼出 (完了)',
+};
+
+const ASK_PURPOSE_LABEL={
+  'text2sql/attempt1': 'SQL 生成 (1 回目)',
+  'text2sql/attempt2': 'SQL 生成 (リトライ)',
+  'answer': '回答文生成',
+};
+
+function _askLine(kind, ev){
+  const isErr=ev && (ev.error || ev.ok===false);
+  const cls=isErr?'err':'';
+  const label=ASK_KIND_LABEL[kind]||kind;
+  const skip=new Set(['kind','t_ms','prompt','response','elapsed_ms','model','result']);
+  const parts=[];
+  for(const [k,v] of Object.entries(ev||{})){
+    if(skip.has(k)) continue;
+    if(v==null) continue;
+    const sv=typeof v==='object'?JSON.stringify(v):String(v);
+    if(sv.length>120 || sv.includes('\n')){
+      parts.push(`<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--dim);font-size:10.5px">${_escHtml(k)}</summary><pre style="margin:6px 0;font-size:11px;color:#c9d4bf;background:var(--panel2);border:1px solid var(--line);padding:8px 10px;max-height:240px;overflow:auto;white-space:pre-wrap">${_escHtml(sv)}</pre></details>`);
+    } else {
+      parts.push(`<span class="dim">${_escHtml(k)}=${_escHtml(sv)}</span>`);
+    }
+  }
+  const elapsed=ev && ev.elapsed_ms!=null ? `<span class="elapsed">${ev.elapsed_ms}ms</span>` : '';
+  return `<div class="step ${cls}"><span class="kind">${_escHtml(label)}</span>${elapsed} ${parts.join(' ')}</div>`;
+}
+
+function _askAppendStep(html){
+  const tl=$('#asktimeline');
+  tl.insertAdjacentHTML('beforeend', html);
+  tl.scrollTop=tl.scrollHeight;
+}
+
+$('#run').onclick=async()=>{
+  const qtext=$('#q').value.trim(); if(!qtext)return;
+  if(_askAbort){ try{ _askAbort.abort(); }catch(_){ } }
+  _askAbort=new AbortController();
+  const tl=$('#asktimeline'); const result=$('#askresult');
+  tl.innerHTML=''; result.style.display='none'; result.innerHTML='';
+
+  const streamCards={};   // purpose → {root,pre,caret}
+
+  function onEvent(ev){
+    const kind=ev.kind||'';
+    if(kind==='question'){
+      _askAppendStep(`<div class="question-head"><span class="label">Q</span>${_escHtml(ev.q||'')}</div>`);
+      return;
+    }
+    if(kind==='llm.ask.start'){
+      const p=ev.purpose||'(unnamed)';
+      const lab=ASK_PURPOSE_LABEL[p]||p;
+      const root=document.createElement('div');
+      root.className='step llm running';
+      root.innerHTML=`<span class="kind">LLM</span><span class="purpose">${_escHtml(lab)}</span>`+
+                    `<pre class="llm-stream"></pre>`;
+      tl.appendChild(root);
+      const pre=root.querySelector('.llm-stream');
+      const caret=document.createElement('span'); caret.className='stream-caret';
+      pre.appendChild(caret);
+      streamCards[p]={root,pre,caret,parts:[]};
+      tl.scrollTop=tl.scrollHeight;
+      return;
+    }
+    if(kind==='llm.delta'){
+      const p=ev.purpose||'';
+      const card=streamCards[p];
+      if(!card) return;
+      card.parts.push(ev.delta||'');
+      // caret の前にテキストを挿入
+      card.caret.insertAdjacentText('beforebegin', ev.delta||'');
+      card.pre.scrollTop=card.pre.scrollHeight;
+      return;
+    }
+    if(kind==='llm.ask'){
+      const p=ev.purpose||'';
+      const card=streamCards[p];
+      if(card){
+        card.root.classList.remove('running');
+        card.root.classList.add('done');
+        if(card.caret && card.caret.parentNode) card.caret.parentNode.removeChild(card.caret);
+        // 最終 response を正本として置換 (stream 中の trim 漏れ等を吸収)
+        if(ev.response!=null){
+          card.pre.textContent=String(ev.response);
+        }
+        if(ev.elapsed_ms!=null){
+          card.root.insertAdjacentHTML('beforeend',
+            `<span class="elapsed">${ev.elapsed_ms}ms</span>`);
+        }
+        if(ev.error){
+          card.root.classList.remove('done');
+          card.root.classList.add('err');
+          card.root.insertAdjacentHTML('beforeend',
+            `<div style="color:var(--warn);margin-top:6px;font-size:11px">${_escHtml(ev.error)}</div>`);
+        }
+      } else {
+        // 念のため fallback: 普通の step として描画
+        _askAppendStep(_askLine(kind, ev));
+      }
+      return;
+    }
+    if(kind==='llm.error'){
+      const p=ev.purpose||'';
+      const card=streamCards[p];
+      if(card){
+        card.root.classList.remove('running','done');
+        card.root.classList.add('err');
+        if(card.caret && card.caret.parentNode) card.caret.parentNode.removeChild(card.caret);
+        card.root.insertAdjacentHTML('beforeend',
+          `<div style="color:var(--warn);margin-top:6px;font-size:11px">${_escHtml(ev.error||'')}</div>`);
+      }
+      return;
+    }
+    if(kind==='done'){
+      if(ev.result) renderAskResult(ev.result);
+      return;
+    }
+    if(kind==='fatal'){
+      _askAppendStep(`<div class="err">⚠ ${_escHtml(ev.error||'')}</div>`);
+      return;
+    }
+    // それ以外の note() 系イベントは汎用 step として描画
+    _askAppendStep(_askLine(kind, ev));
+  }
+
+  let resp;
+  try{
+    resp=await fetch('/api/ask/stream',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:qtext}),
+      signal:_askAbort.signal,
+    });
+  }catch(e){
+    if(e.name==='AbortError') return;
+    _askAppendStep(`<div class="err">サーバ通信失敗: ${_escHtml(e.message||e)}</div>`);
+    return;
+  }
+  if(!resp.ok || !resp.body){
+    _askAppendStep(`<div class="err">サーバ応答エラー (HTTP ${resp.status})</div>`);
+    return;
+  }
+  const reader=resp.body.getReader();
+  const dec=new TextDecoder();
+  let buf='';
+  while(true){
+    let chunk;
+    try{ chunk=await reader.read(); }
+    catch(e){ if(e.name==='AbortError') return; throw e; }
+    if(chunk.done) break;
+    buf+=dec.decode(chunk.value,{stream:true});
+    let idx;
+    while((idx=buf.indexOf('\n\n'))>=0){
+      const frame=buf.slice(0,idx); buf=buf.slice(idx+2);
+      const lines=frame.split('\n');
+      for(const line of lines){
+        if(!line.startsWith('data:')) continue;
+        const payload=line.slice(5).trimStart();
+        if(!payload) continue;
+        let ev;
+        try{ ev=JSON.parse(payload); }
+        catch(_){ continue; }
+        onEvent(ev);
+      }
+    }
+  }
 };
 
 // ===== Eval =====

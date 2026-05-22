@@ -7,10 +7,14 @@ DB は read-only で開く (mutating endpoint は別接続で書込)。
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
+from queue import Queue
 
 import config
 import db as kg
+import llm
 import proposal_review as pr
 import query as q
 
@@ -18,7 +22,7 @@ EVAL_RUNS_DIR = config.ROOT / "data" / "eval" / "runs"
 
 try:
     from fastapi import Body, FastAPI
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
     from fastapi.staticfiles import StaticFiles
     import uvicorn
 except ImportError:
@@ -613,6 +617,59 @@ def ask(payload: dict = Body(...)):
     if not question:
         return JSONResponse({"error": "question is empty"}, status_code=400)
     return q.answer_question(question)
+
+
+@app.post("/api/ask/stream")
+def ask_stream(payload: dict = Body(...)):
+    """SSE で step 進行 + LLM 出力 token を逐次配信。
+
+    answer_question は blocking なので worker thread で走らせ、queue.Queue
+    で SSE generator へブリッジする。ContextVar はスレッドローカルなので
+    stream_session() は **worker thread の中で** set すること。
+    """
+    question = (payload or {}).get("question", "").strip()
+    if not question:
+        return JSONResponse({"error": "question is empty"}, status_code=400)
+
+    events: Queue = Queue()
+    SENTINEL = object()
+
+    def worker() -> None:
+        try:
+            with llm.stream_session(events.put):
+                result = q.answer_question(question)
+            events.put({
+                "kind": "done",
+                "t_ms": int(time.time() * 1000),
+                "result": result,
+            })
+        except Exception as e:  # noqa: BLE001
+            events.put({
+                "kind": "fatal",
+                "t_ms": int(time.time() * 1000),
+                "error": f"{type(e).__name__}: {e}",
+            })
+        finally:
+            events.put(SENTINEL)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def gen():
+        while True:
+            ev = events.get()
+            if ev is SENTINEL:
+                break
+            yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/")
