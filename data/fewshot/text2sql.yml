@@ -1,0 +1,24 @@
+# Text2SQL Fewshot プール
+# tools/query.py::select_fewshots() が読み込む。
+# 質問と各 item.q の embedding cos-sim 上位 k 件 (config.FEWSHOT_TOPK) が prompt に注入される。
+#
+# 運用方針:
+# - クエリ gold (data/eval/gold/query/*.yml) の質問はリーク防止のためそのまま入れない。
+#   類似パターンを入れたい場合は語彙・対象を変奏する。
+# - id は重複検査と将来の per-id 統計用。kebab-case。
+# - sql は SELECT 1 文・末尾セミコロン許容・LIMIT 推奨 (autofix が補う)。
+# - note は selection には使わないがレビュー時の補助コメント。
+version: 1
+items:
+  - id: emp-ceo
+    q: "Acme の CEO は誰か"
+    sql: "SELECT p.canonical_name FROM employment e JOIN person p ON p.id=e.person_id JOIN organization o ON o.id=e.organization_id WHERE o.canonical_name LIKE '%Acme%' AND e.role LIKE '%CEO%' LIMIT 20;"
+    note: "canonical join + alias LIKE"
+  - id: person-range
+    q: "1990 年以降に生まれた person を列挙"
+    sql: "SELECT canonical_name, birth_date FROM person WHERE birth_date >= '1990-01-01' ORDER BY birth_date LIMIT 50;"
+    note: "range は canonical 表のみ (R1)"
+  - id: claims-history
+    q: "Alice の role 履歴"
+    sql: "SELECT c.value AS role, c.created_at, c.document_id FROM employment_claims c JOIN employment e ON e.id=c.employment_id JOIN person p ON p.id=e.person_id WHERE p.canonical_name LIKE '%Alice%' AND c.column_name='role' AND c.status IN ('active','superseded') ORDER BY c.created_at LIMIT 50;"
+    note: "claims 履歴は status を明示 (R2 autofix 回避)"

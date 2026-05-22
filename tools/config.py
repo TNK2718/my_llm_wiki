@@ -61,6 +61,12 @@ HINT_TOPK_PER_COLUMN = 3
 HINT_VOCAB_CAP = 12
 HINT_MAX_CHARS = 700              # 8192 ctx 圧迫防止
 
+# --- text2sql Fewshot 動的注入 ---
+# 質問と類似する (NL, SQL) ペアを embedding cos-sim で top-k 取って prompt に注入する。
+# プールが空 / 不在ならフォールバック (例なし)、embed 失敗時は先頭 k 件決定論的に。
+FEWSHOT_POOL = ROOT / "data" / "fewshot" / "text2sql.yml"
+FEWSHOT_TOPK = 3
+
 # --- entity matching (db.candidate_entities_*) ---
 # typed-schema-design §D1 の「決定論的算出 (norm_key + embedding cos sim)」を実装する閾値。
 # text2sql の HINT_* は recall 寄り、こちらは誤マージ防止のため precision 寄りで高めに設定。

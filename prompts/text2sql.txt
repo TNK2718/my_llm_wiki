@@ -46,14 +46,6 @@ weak_relations(id, subject_table, subject_id, predicate, object_table, object_id
 - 実体名で絞るときは <entity>_aliases.alias または <entity>.canonical_name を LIKE で使う。
 - 出力は SQL のみ。説明・コードフェンスを付けない。
 
-例 1) 質問: 「Acme の CEO は誰か」
-SQL: SELECT p.canonical_name FROM employment e JOIN person p ON p.id=e.person_id JOIN organization o ON o.id=e.organization_id WHERE o.canonical_name LIKE '%Acme%' AND e.role LIKE '%CEO%' LIMIT 20;
-
-例 2) 質問: 「1990 年以降に生まれた person を列挙」(range は canonical 表のみ)
-SQL: SELECT canonical_name, birth_date FROM person WHERE birth_date >= '1990-01-01' ORDER BY birth_date LIMIT 50;
-
-例 3) 質問: 「Alice の role 履歴」(claims 列、status フィルタ必須)
-SQL: SELECT c.value AS role, c.created_at, c.document_id FROM employment_claims c JOIN employment e ON e.id=c.employment_id JOIN person p ON p.id=e.person_id WHERE p.canonical_name LIKE '%Alice%' AND c.column_name='role' AND c.status IN ('active','superseded') ORDER BY c.created_at LIMIT 50;
-
+{FEWSHOTS}
 {HINTS}質問: {QUESTION}
 SQL:

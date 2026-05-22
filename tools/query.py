@@ -5,11 +5,14 @@ CLI:
 
 サーバからは answer_question() を呼ぶ。
 """
+import functools
 import hashlib
 import re
 import sqlite3
 import struct
 import sys
+
+import yaml
 
 import config
 import db as kg
@@ -158,6 +161,74 @@ def column_hints(question: str) -> str:
     return block[: config.HINT_MAX_CHARS]
 
 
+# ---------- Fewshot 動的選択 ----------
+@functools.cache
+def _load_fewshot_pool() -> tuple[dict, ...]:
+    """data/fewshot/text2sql.yml を読んで items を返す。
+    ファイル不在 / 空 / version 不一致 → 空タプル。
+    tuple を返すのは @cache 用 (mutable list を返すと呼び出し側で破壊できてしまう)。"""
+    path = config.FEWSHOT_POOL
+    if not path.exists():
+        return ()
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return ()
+    if data.get("version") != 1:
+        return ()
+    items = data.get("items") or []
+    out: list[dict] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        q, sql = it.get("q"), it.get("sql")
+        if not q or not sql:
+            continue
+        out.append({
+            "id": it.get("id") or f"_anon_{len(out)}",
+            "q": q,
+            "sql": sql,
+            "note": it.get("note") or "",
+        })
+    return tuple(out)
+
+
+def select_fewshots(question: str, k: int) -> list[dict]:
+    """質問に近い Fewshot を embedding cos-sim で top-k 取る。
+
+    - プールが空 → []
+    - 質問 embed が None → プール先頭 k 件 (CI で Ollama 不在でも動かす)
+    - item 側 embed が None → cos-sim = -inf 扱いで末尾送り (= 取得しない)
+    """
+    pool = _load_fewshot_pool()
+    if not pool or k <= 0:
+        return []
+    q_vec = _embed_cached(question)
+    if q_vec is None:
+        return [dict(it) for it in pool[:k]]
+    scored: list[tuple[float, int, dict]] = []
+    for i, it in enumerate(pool):
+        v = _embed_cached(it["q"])
+        if v is None or len(v) != len(q_vec):
+            continue
+        scored.append((_cosine(q_vec, v), i, it))
+    # 降順、同点は YAML 出現順 (i 昇順) で安定化
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [dict(it) for _, _, it in scored[:k]]
+
+
+def _format_fewshots(items: list[dict]) -> str:
+    """text2sql.txt の旧 fixed 3 例と同形式で 1-indexed に整形。空なら ""。"""
+    if not items:
+        return ""
+    lines: list[str] = []
+    for i, it in enumerate(items, start=1):
+        lines.append(f'例 {i}) 質問: 「{it["q"]}」')
+        lines.append(f'SQL: {it["sql"]}')
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 # ---------- text2sql + linter retry ----------
 def text2sql(question: str):
     """1) hint 付きプロンプト → validate (R1/R2 含む) → run。
@@ -168,7 +239,14 @@ def text2sql(question: str):
     hints = column_hints(question)
     llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
     hint_block = f"{hints}\n\n" if hints else ""
-    base_prompt = tmpl.replace("{HINTS}", hint_block).replace("{QUESTION}", question)
+    fewshots = select_fewshots(question, k=config.FEWSHOT_TOPK)
+    llm.note("text2sql.fewshots", ids=[f["id"] for f in fewshots])
+    fewshot_block = _format_fewshots(fewshots)
+    base_prompt = (
+        tmpl.replace("{HINTS}", hint_block)
+        .replace("{FEWSHOTS}", fewshot_block)
+        .replace("{QUESTION}", question)
+    )
 
     with llm.ask_as("text2sql/attempt1"):
         sql_raw = re.sub(r"```sql|```", "", llm.ask(base_prompt)).strip()

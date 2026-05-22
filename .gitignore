@@ -223,6 +223,9 @@ data/eval/fixtures/*
 data/eval/runs/*
 !data/eval/runs/.gitkeep
 
+# fewshot プール (text2sql 動的 fewshot 用 curated YAML) は git 管理
+!data/fewshot/
+
 # 旧 eval パス（参考）
 eval/storage/*.sqlite*
 eval/results/*.json
