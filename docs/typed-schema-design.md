@@ -477,9 +477,16 @@ canonical が著しく弱い主張で初期化されないよう、低 conf clai
 
 `record_claim()` / `record_existence_claim()` は conf < 0.3 で `'rejected_low_confidence'` を返し、呼び出し元（`tools/ingest.py`）が staging/weak への振り分けを行う。
 
-### 8. text2sql からの claims アクセス（linter 規約）
+### 8. text2sql からの claims アクセス（linter / autofix 規約）
 
-claims 表は監査・履歴・矛盾管理用途で、通常の事実問い合わせは canonical 表を使う。ただし「履歴」「裏付け数」「矛盾一覧」を求める質問では claims を引く必要があるので、**「claims を SELECT 対象に含めない」全面禁止は採らない**。代わりに以下 2 ルールを linter で強制する:
+claims 表は監査・履歴・矛盾管理用途で、通常の事実問い合わせは canonical 表を使う。ただし「履歴」「裏付け数」「矛盾一覧」を求める質問では claims を引く必要があるので、**「claims を SELECT 対象に含めない」全面禁止は採らない**。代わりに以下 2 ルールを以下方針で扱う:
+
+| ルール | 性質 | 扱い |
+|---|---|---|
+| R1 (claims.value への range/比較/CAST 禁止) | 意味論的 (canonical 列への書き換えが必要) | **lint で reject** |
+| R2 (claims/existence_claims は status フィルタ必須) | 決定論的 (述語の AND 結合だけ) | **autofix で注入** |
+
+「決定論的に補完できるなら LLM に書かせず注入する」が方針。`LIMIT` 強制と同じ性質。R1 は意味論的書き換えが必要なので autofix せず raise。
 
 **R1. `*_claims.value` への range / 比較 predicate を禁止**
 
@@ -488,16 +495,18 @@ claims 表は監査・履歴・矛盾管理用途で、通常の事実問い合�
 - 理由: claims.value は TEXT 一律。型情報は canonical 側のみ。range クエリは canonical 表を使うべき
 - 例: `WHERE person.birth_date > '1990-01-01'` は OK、`WHERE person_claims.value > '1990-01-01'` は NG
 
-**R2. `*_claims` / `*_existence_claims` への参照は `status` フィルタ必須**
+**R2. `*_claims` / `*_existence_claims` への参照は `status` フィルタを autofix で注入**
 
-- `FROM <table>_claims` または `JOIN <table>_claims` のとき、当該別名に対する `status = …` または `status IN (…)` predicate が WHERE / JOIN ON のいずれかに必要
-- 理由: claims は active / superseded / conflicted を保持する。フィルタなし aggregation は誤集計（例: 5 文書のうち 4 文書が superseded された主張で COUNT(*)=5 になる）
-- 例外: `SELECT status, COUNT(*) FROM person_claims GROUP BY status` は status が SELECT に出現し集計目的が明示的なので許可
+- `FROM <table>_claims` または `JOIN <table>_claims` の各別名について、status predicate が無ければ生成後に `AND <alias>.status = 'active'` を WHERE に AND 結合で自動注入する
+- LLM が明示的に `status IN ('active','superseded')` 等を書いている場合は触らない (history クエリの余地を残す)
+- 例外: `SELECT <alias>.status, COUNT(*) FROM ... GROUP BY <alias>.status` は status を集計対象として明示しているので注入対象外
+- 理由: claims は active / superseded / conflicted を保持する。フィルタなし aggregation は誤集計（例: 5 文書のうち 4 文書が superseded された主張で COUNT(*)=5 になる）。一方、status フィルタ「漏れ」は LLM の単純な忘れによる発生がほとんどで、autofix で解決できる
+- プロンプト側のルール記述は「省略可、デフォルト active」のトーンに変更し、LLM の認知負荷を下げる
 
-**許可される claims クエリ例**:
+**許可される claims クエリ例** (autofix 後の意味):
 
 ```sql
--- Alice の role 履歴を時系列で
+-- Alice の role 履歴を時系列で (history を見たいので status を明示)
 SELECT c.value, c.created_at, c.document_id
   FROM employment_claims c
   JOIN employment e ON e.id = c.employment_id
@@ -506,22 +515,31 @@ SELECT c.value, c.created_at, c.document_id
    AND c.status IN ('active','superseded')
  ORDER BY c.created_at;
 
--- Alice の birth_date を何文書が裏付けているか
+-- Alice の birth_date を何文書が裏付けているか (LLM が status 省略 → autofix が active を注入)
 SELECT COUNT(DISTINCT document_id)
   FROM person_claims
  WHERE person_id = :alice
-   AND column_name = 'birth_date'
-   AND status = 'active';
+   AND column_name = 'birth_date';
+-- autofix 後:
+-- SELECT COUNT(DISTINCT document_id) FROM person_claims
+--  WHERE person_id = :alice AND column_name = 'birth_date'
+--    AND person_claims.status = 'active';
 
--- 現在 conflict 状態の主張一覧
+-- 現在 conflict 状態の主張一覧 (status 明示しているので autofix は no-op)
 SELECT * FROM person_claims WHERE status = 'conflicted';
 ```
 
 **実装方針**:
 
-- `tools/query.py` の生成後 lint pass で `sqlglot` AST を walk
-- R1 / R2 違反を検出したら、エラー内容を含めて prompt を再生成 (1 回 retry)
-- retry も通らなければ FTS fallback。Phase 4 で retry 回数とメトリクスを調整
+- `tools/sql_linter.py` に `autofix(sql) -> (fixed_sql, injected_aliases)` を実装
+  - `sqlglot.parse_one(sql, dialect='sqlite')` で AST 化
+  - 既存 `_claim_aliases()` / `_aliases_in_status_predicates()` / `_has_select_status_aggregate()` で注入対象 alias を決定
+  - 各 alias に `exp.EQ(this=exp.Column(this='status', table=alias), expression=exp.Literal.string('active'))` を AST レベルで WHERE に AND 結合
+  - parse 失敗時は元の SQL をそのまま返す (後段 `validate_sql()` の他チェックに任せる)
+- `autofix_or_raise(sql)` で R2 を fix → 残違反 (R1 など) があれば従来通り `ValueError` を raise
+- `tools/query.py:validate_sql()` の `sql_linter.lint_or_raise(sql)` を `sql_linter.autofix_or_raise(sql)` に差し替え
+- 互換維持のため `lint_or_raise()` 自体は残す
+- R1 が残ったとき / その他 SQL 実行エラーは `text2sql` の attempt 2 (column_hints + err_block) で 1 回 retry → さらに失敗で FTS fallback (従来通り)
 
 ---
 
@@ -713,7 +731,7 @@ canonical_stability:
 | `tools/db.py` | 大半書き換え。型別 `upsert_<type>()` / `find_or_create_<junction>()` / `record_existence_claim()` / `record_claim()` に分割。`record_existence_claim()` も `record_claim()` も §3 状態遷移を実装（前者は junction 行のキャッシュ列を、後者は canonical 表の属性列を UPDATE）。書き込みは **`BEGIN IMMEDIATE`** で 1 トランザクション化。戻り値は `RecordClaimResult` enum（§6 参照）。dedup ロジック（`norm_key` / aliases）はテーブル単位で再利用（`tools/normalize.py` 系の正規化規則を継承）。`connect()` で毎回 `PRAGMA foreign_keys=ON` |
 | `tools/extract_schema.py` (or extractor post-processing) | LLM 抽出の `confidence` フィールドを post-processing で `min(raw, 0.95)` に cap（§5）。`record_claim()` 呼び出し前に適用 |
 | `tools/ingest.py` | LLM プロンプトを「typed extract + match-or-propose」へ刷新。staging / weak_relations への積み上げを追加 |
-| `tools/query.py` | text2sql の system prompt とスキーマ提示を刷新。`column_hints` は型 schema の中で動くため大半不要に。FTS fallback は残す。生成 SQL に対し §8 の linter (R1: claims.value への range/比較 禁止、R2: claims アクセスは status フィルタ必須) を `sqlglot` AST で検査、違反は 1 回 retry → FTS fallback |
+| `tools/query.py` | text2sql の system prompt とスキーマ提示を刷新。`column_hints` は attempt 1 から注入し型 schema 内の列名語彙を出す。FTS fallback は残す。生成 SQL に対し §8 の linter / autofix (R1: claims.value への range/比較 禁止 → raise、R2: claims アクセスの status フィルタ → `AND <alias>.status='active'` を autofix で注入) を `sqlglot` AST で実施、R1 残違反は 1 回 retry → FTS fallback |
 | `tools/server.py` | `/api/entities` 系を型別エンドポイントへ分割、`/api/proposals` / `/api/staging` / `/api/weak_relations` を新設。`POST /api/proposals/:id/approve` は AST 事前検証（`sqlglot` + kind 別許容形式チェック、レビューフロー §3 step 1）→ dry-run → diff → apply のパイプラインを実装 |
 | `web/` | ダッシュボードに「スキーマ提案レビュー」「未確定抽出レビュー」「弱関係レビュー」のタブを追加 |
 | `prompts/` | `extract_graph` を typed extract + proposal 出力に書き換え（concept 型を提案候補から外す）。dedup プロンプトは継続利用 |
@@ -776,8 +794,8 @@ canonical_stability:
 - 同 doc を 2 回 ingest し同 value なら canonical 不変、claim 行の `evidence` / `confidence` のみ更新、`created_at` 据え置き
 - 同 doc を 2 回 ingest し異 value なら全列 UPDATE + §3 再計算が走る
 - text2sql ベンチで「型テーブル直接クエリ」プロンプト経由でも Phase 4 で確定する閾値以上のスコア（gold 再生成済み前提、目安は旧 gold スコアの 80%）
-- text2sql 生成 SQL に対する §8 linter が起動: (R1) `*_claims.value` に `<`/`>`/`BETWEEN`/`LIKE`/型変換関数のいずれかが当たっている SQL は reject、(R2) `FROM/JOIN *_claims` または `*_existence_claims` に対し `status` predicate を欠く SQL は reject
-- 「Alice の role 履歴」「birth_date の裏付け文書数」「現在 conflict 状態の主張」のような正当な claims クエリは linter を通過する（gold に positive sample として含める）
+- text2sql 生成 SQL に対する §8 が起動: (R1) `*_claims.value` に `<`/`>`/`BETWEEN`/`LIKE`/型変換関数のいずれかが当たっている SQL は raise、(R2) `FROM/JOIN *_claims` または `*_existence_claims` に対し `status` predicate を欠く alias には `AND <alias>.status='active'` を autofix で注入
+- 「Alice の role 履歴」「birth_date の裏付け文書数」「現在 conflict 状態の主張」のような正当な claims クエリは autofix を no-op で通過する（gold に positive sample として含める）
 - ダッシュボードで `/api/proposals?status=pending` / `/api/staging?status=pending` / `/api/weak_relations?promoted_to=null` が件数を返す
 - `*_claims.column_name` が対応 canonical 表の列名集合からしか取れない（CHECK 制約で担保、sentinel `'*'` は許容されない）
 - `entity_mentions.entity_table` / `weak_relations.subject_table` が starter set の enum（`concept` を含まない）からしか取れない

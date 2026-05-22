@@ -30,8 +30,8 @@ def validate_sql(sql: str) -> str:
         raise ValueError("書き込み/DDL 系キーワードは不可")
     if not re.search(r"(?i)\blimit\b", sql):
         sql += " LIMIT 50"
-    # §8 linter R1/R2 (typed-schema-design)
-    sql_linter.lint_or_raise(sql)
+    # §8 linter R1 / autofix R2 (typed-schema-design)
+    sql = sql_linter.autofix_or_raise(sql)
     return sql
 
 
@@ -130,13 +130,23 @@ def column_hints(question: str) -> str:
                 picks = [f"'{v}'" for _, v in scored[: config.HINT_TOPK_PER_COLUMN]]
                 lines.append(f"- {col} に近い候補: " + ", ".join(picks))
 
-    # organization.org_type の enum は schema CHECK で固定なので語彙提示は不要だが、
-    # ユーザ向けに念のため出す
+    # *_claims.column_name と enum 列の語彙 (schema CHECK 由来の固定値)
     vocab = [
         ("organization.org_type",
          ("company", "lab", "team", "university", "government", "nonprofit", "other")),
-        ("employment_claims.column_name", ("role", "end_date")),
         ("person_claims.column_name", ("canonical_name", "birth_date", "nationality")),
+        ("organization_claims.column_name",
+         ("canonical_name", "org_type", "founded_year", "headquarters")),
+        ("product_claims.column_name",
+         ("canonical_name", "release_date", "category",
+          "billing_period", "included_quota_units", "quota_unit_name", "trial_period_days")),
+        ("project_claims.column_name", ("canonical_name", "started_at", "ended_at")),
+        ("contract_claims.column_name",
+         ("canonical_name", "contract_type", "effective_date", "valid_until",
+          "jurisdiction", "url", "version",
+          "sla_uptime_percent", "sla_response_time_minutes",
+          "rto_hours", "rpo_hours")),
+        ("employment_claims.column_name", ("role", "end_date")),
     ]
     for col, vals in vocab:
         if vals:
@@ -150,13 +160,18 @@ def column_hints(question: str) -> str:
 
 # ---------- text2sql + linter retry ----------
 def text2sql(question: str):
-    """1) 素のプロンプト → validate (R1/R2 含む) → run。
-    2) エラー or 0 行なら column_hints + lint 違反内容を注入して 1 回 retry。
+    """1) hint 付きプロンプト → validate (R1/R2 含む) → run。
+    2) エラー or 0 行なら lint 違反内容/エラー文を追記して 1 回 retry (hints は再利用)。
     3) それでも失敗なら呼び出し元で FTS fallback。
     """
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
+    hints = column_hints(question)
+    llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
+    hint_block = f"{hints}\n\n" if hints else ""
+    base_prompt = tmpl.replace("{HINTS}", hint_block).replace("{QUESTION}", question)
+
     with llm.ask_as("text2sql/attempt1"):
-        sql_raw = re.sub(r"```sql|```", "", llm.ask(tmpl.replace("{QUESTION}", question))).strip()
+        sql_raw = re.sub(r"```sql|```", "", llm.ask(base_prompt)).strip()
     llm.note("text2sql.sql_raw", sql=sql_raw)
 
     sql, rows, err = None, None, None
@@ -173,8 +188,6 @@ def text2sql(question: str):
                  attempt=1, ok=False, error=f"{type(e).__name__}: {e}")
 
     llm.note("text2sql.retry_decision", reason="error" if err is not None else "zero_rows")
-    hints = column_hints(question)
-    llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
 
     err_block = ""
     if err is not None:
@@ -186,21 +199,16 @@ def text2sql(question: str):
         err_block = (
             f"\n\n直前の SQL は構文OKだが 0 行だった:\n{sql}\n"
             "LIKE パターンが質問語の英訳/言い換えで DB の実値と一致していない可能性が高い。"
-            "下記の候補語をそのまま LIKE のパターンに採用すること。\n"
+            "上のヒント候補語をそのまま LIKE のパターンに採用すること。\n"
         )
 
-    if not hints and not err_block:
+    if not err_block:
         if err is not None:
             raise err
         return sql, rows  # rows == [] 確定
 
     with llm.ask_as("text2sql/attempt2"):
-        fix = llm.ask(
-            tmpl.replace("{QUESTION}", question)
-            + err_block
-            + (f"\n{hints}" if hints else "")
-            + "\n修正後の SQL のみ:"
-        )
+        fix = llm.ask(base_prompt + err_block + "\n修正後の SQL のみ:")
     llm.note("text2sql.sql_raw", attempt=2, sql=fix)
     try:
         sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())

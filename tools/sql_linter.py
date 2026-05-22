@@ -205,3 +205,57 @@ def lint_or_raise(sql: str) -> None:
     violations = lint(sql)
     if violations:
         raise ValueError("text2sql linter R1/R2 violations: " + "; ".join(str(v) for v in violations))
+
+
+def autofix(sql: str) -> tuple[str, list[str]]:
+    """R2 違反 (status フィルタ欠落) を `AND <alias>.status='active'` 注入で修正。
+
+    R1 違反や parse 失敗は触らない (後段の lint で検出される)。
+    LLM が明示的に status を書いた alias は対象外、`GROUP BY status` の集計クエリも除外。
+
+    Returns: (修正後 SQL, 注入した alias 名のリスト)
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect="sqlite")
+    except Exception:
+        return sql, []
+    if tree is None:
+        return sql, []
+
+    aliases = _claim_aliases(tree)
+    if not aliases:
+        return sql, []
+
+    statused = _aliases_in_status_predicates(tree, aliases)
+
+    to_inject: list[str] = []
+    for alias, _real in aliases:
+        if alias in statused:
+            continue
+        if _has_select_status_aggregate(tree, alias):
+            continue
+        to_inject.append(alias)
+
+    if not to_inject:
+        return sql, []
+
+    select_node = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+    if select_node is None:
+        return sql, []
+
+    for alias in to_inject:
+        select_node.where(f"{alias}.status = 'active'", append=True, copy=False)
+
+    return select_node.sql(dialect="sqlite"), to_inject
+
+
+def autofix_or_raise(sql: str) -> str:
+    """autofix を当てた上で残った違反 (R1 等) があれば ValueError を raise。"""
+    fixed, _injected = autofix(sql)
+    violations = lint(fixed)
+    if violations:
+        raise ValueError(
+            "text2sql linter R1/R2 violations: "
+            + "; ".join(str(v) for v in violations)
+        )
+    return fixed

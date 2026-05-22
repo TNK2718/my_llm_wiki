@@ -51,7 +51,7 @@ WEAK_RELATION_PROMOTION_N = 5
 # --- migrations ---
 MIGRATIONS_DIR = ROOT / "tools" / "migrations"
 
-# --- text2sql 修復ヒント（失敗時のみ参照） ---
+# --- text2sql ヒント (attempt 1 から注入、attempt 2 でも再利用) ---
 EMBED_URL = "http://localhost:11434/api/embeddings"
 EMBED_MODEL = "bge-m3:latest"     # 多言語・日本語強め (1024 dim)。granite より重いが cache で吸収。
 EMBED_CACHE_DB = ROOT / "data" / "embed_cache.sqlite"  # 値→ベクトルの永続キャッシュ

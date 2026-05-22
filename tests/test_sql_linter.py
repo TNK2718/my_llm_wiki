@@ -129,3 +129,99 @@ def test_evidence_count_query_passes():
 def test_current_conflicts_query_passes():
     sql = "SELECT * FROM person_claims WHERE status='conflicted'"
     assert sql_linter.lint(sql) == []
+
+
+# ---------- autofix: 決定論的に status='active' を注入 ----------
+
+def test_autofix_r2_no_alias_adds_status():
+    sql = "SELECT value FROM person_claims WHERE person_id=1 AND column_name='birth_date'"
+    fixed, injected = sql_linter.autofix(sql)
+    assert injected == ["person_claims"]
+    assert sql_linter.lint(fixed) == []
+
+
+def test_autofix_r2_with_alias():
+    sql = "SELECT pc.value FROM person_claims pc WHERE pc.person_id=1"
+    fixed, injected = sql_linter.autofix(sql)
+    assert injected == ["pc"]
+    assert sql_linter.lint(fixed) == []
+
+
+def test_autofix_r2_join_with_alias():
+    sql = (
+        "SELECT c.value FROM employment_claims c "
+        "JOIN employment e ON e.id=c.employment_id "
+        "WHERE c.column_name='role'"
+    )
+    fixed, injected = sql_linter.autofix(sql)
+    assert injected == ["c"]
+    assert sql_linter.lint(fixed) == []
+
+
+def test_autofix_r2_multiple_claims():
+    sql = (
+        "SELECT pc.value, oc.value FROM person_claims pc "
+        "JOIN organization_claims oc ON oc.organization_id = pc.person_id"
+    )
+    fixed, injected = sql_linter.autofix(sql)
+    assert set(injected) == {"pc", "oc"}
+    assert sql_linter.lint(fixed) == []
+
+
+def test_autofix_r2_aggregate_exempt_no_change():
+    sql = "SELECT status, COUNT(*) FROM person_claims GROUP BY status"
+    fixed, injected = sql_linter.autofix(sql)
+    assert injected == []
+    assert sql_linter.lint(fixed) == []
+
+
+def test_autofix_r2_status_present_no_change():
+    sql = "SELECT value FROM person_claims WHERE person_id=1 AND status='active'"
+    _fixed, injected = sql_linter.autofix(sql)
+    assert injected == []
+
+
+def test_autofix_r2_status_in_list_preserved():
+    sql = (
+        "SELECT c.value FROM employment_claims c "
+        "WHERE c.column_name='role' AND c.status IN ('active','superseded')"
+    )
+    fixed, injected = sql_linter.autofix(sql)
+    assert injected == []
+    # 既存の status IN (...) が autofix で壊れていない
+    assert "active" in fixed and "superseded" in fixed
+
+
+def test_autofix_or_raise_r1_still_raises():
+    # R1 は autofix されず、autofix 後の lint で raise する
+    sql = (
+        "SELECT * FROM person_claims pc WHERE pc.value > '1990-01-01' "
+        "AND pc.status='active'"
+    )
+    with pytest.raises(ValueError, match="R1"):
+        sql_linter.autofix_or_raise(sql)
+
+
+def test_autofix_parse_failure_passthrough():
+    sql = "this is not sql at all"
+    fixed, injected = sql_linter.autofix(sql)
+    assert fixed == sql
+    assert injected == []
+
+
+def test_autofix_or_raise_clean_sql_idempotent():
+    sql = "SELECT canonical_name FROM person WHERE birth_date >= '1990-01-01' LIMIT 50"
+    out = sql_linter.autofix_or_raise(sql)
+    assert sql_linter.lint(out) == []
+
+
+def test_autofix_typed_text2sql_failure_recovered():
+    # 直近 eval で実際に落ちた SQL (i127-9285 query gold)
+    sql = (
+        "SELECT T2.value FROM product_claims AS T2 "
+        "JOIN product_aliases AS T1 ON T1.product_id = T2.product_id "
+        "WHERE T1.alias = 'IBM Bob Enterprise' AND T2.column_name = 'quota_unit_name'"
+    )
+    fixed = sql_linter.autofix_or_raise(sql)
+    assert sql_linter.lint(fixed) == []
+    assert "active" in fixed.lower()

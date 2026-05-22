@@ -1,0 +1,35 @@
+# Typed-schema query gold (IBM Bob サービス記述書 / i127-9285 fixture)。
+#
+# 目的: text2sql の column_hints が「日常語 ↔ 列名語彙」のギャップを橋渡しできるか測る。
+# 質問は意図的に gold の列名 (billing_period / quota_unit_name) とずらしてある:
+#   - "課金単位" → product_claims.column_name='quota_unit_name'
+#   - "課金サイクル" → product_claims.column_name='billing_period'
+#   - "無料評価版" は IBM Bob 無料評価版 (alias: "Bob 無料評価版")
+schema_version: 2
+fixture: i127-9285.sqlite
+extract_gold: data/eval/gold/extract/i127-9285.yml
+
+qa:
+  # === 列名マッピング: "課金単位" → quota_unit_name ===
+  - q: "IBM Bobの課金単位は？"
+    expected_row_contains:
+      - { column: "*", value: "Bobcoin" }
+    expected_doc_slugs: ["i127-9285"]
+
+  # === 列名マッピング + variant 解決 ===
+  - q: "IBM Bob Enterprise の課金単位は？"
+    expected_row_contains:
+      - { column: "*", value: "Bobcoin" }
+    expected_doc_slugs: ["i127-9285"]
+
+  # === 列名マッピング: "課金サイクル" → billing_period ===
+  - q: "IBM Bob Pro の課金サイクルは？"
+    expected_row_contains:
+      - { column: "*", value: "monthly" }
+    expected_doc_slugs: ["i127-9285"]
+
+  # === 別名解決 + trial_period_days ===
+  - q: "Bob 無料評価版の試用期間は？"
+    expected_row_contains:
+      - { column: "*", value: "30" }
+    expected_doc_slugs: ["i127-9285"]
