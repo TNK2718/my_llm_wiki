@@ -11,9 +11,9 @@
 version: 1
 items:
   - id: emp-ceo
-    q: "Acme の CEO は誰か"
-    sql: "SELECT p.canonical_name FROM employment e JOIN person p ON p.id=e.person_id JOIN organization o ON o.id=e.organization_id WHERE o.canonical_name LIKE '%Acme%' AND e.role LIKE '%CEO%' LIMIT 20;"
-    note: "canonical join + alias LIKE"
+    q: "グロベックス株式会社 の CEO は誰か"
+    sql: "SELECT p.canonical_name FROM employment e JOIN person p ON p.id=e.person_id JOIN organization o ON o.id=e.organization_id WHERE o.canonical_name LIKE '%グロベックス%' AND e.role LIKE '%CEO%' LIMIT 20;"
+    note: "canonical join + LIKE。JP 質問は LIKE も JP 表記で"
   - id: person-range
     q: "1990 年以降に生まれた person を列挙"
     sql: "SELECT canonical_name, birth_date FROM person WHERE birth_date >= '1990-01-01' ORDER BY birth_date LIMIT 50;"
@@ -22,3 +22,51 @@ items:
     q: "Alice の role 履歴"
     sql: "SELECT c.value AS role, c.created_at, c.document_id FROM employment_claims c JOIN employment e ON e.id=c.employment_id JOIN person p ON p.id=e.person_id WHERE p.canonical_name LIKE '%Alice%' AND c.column_name='role' AND c.status IN ('active','superseded') ORDER BY c.created_at LIMIT 50;"
     note: "claims 履歴は status を明示 (R2 autofix 回避)"
+  - id: org-by-alias
+    q: "Globex Corp の別名で登録されている organization の本社所在地"
+    sql: "SELECT o.canonical_name, o.headquarters FROM organization o JOIN organization_aliases a ON a.organization_id=o.id WHERE a.alias LIKE '%Globex%' LIMIT 5;"
+    note: "alias LIKE 経由で canonical を逆引き"
+  - id: org-founded-range
+    q: "2000 年より前に設立された organization 一覧"
+    sql: "SELECT canonical_name, founded_year, headquarters FROM organization WHERE founded_year < 2000 ORDER BY founded_year LIMIT 50;"
+    note: "founded_year は canonical 数値列 (R1 適合)"
+  - id: org-type-filter
+    q: "lab タイプの organization を新しい順に"
+    sql: "SELECT canonical_name, founded_year FROM organization WHERE org_type='lab' ORDER BY founded_year DESC LIMIT 50;"
+    note: "org_type は CHECK enum (company/lab/team/university/government/nonprofit/other)"
+  - id: product-release-range
+    q: "2022 年以降にリリースされた product"
+    sql: "SELECT canonical_name, release_date, category FROM product WHERE release_date >= '2022-01-01' ORDER BY release_date DESC LIMIT 50;"
+    note: "release_date は canonical 日付列 (R1 適合)"
+  - id: product-canonical-attr
+    q: "Widget Pro の課金周期と利用枠数"
+    sql: "SELECT canonical_name, billing_period, included_quota_units, quota_unit_name, trial_period_days FROM product WHERE canonical_name LIKE '%Widget Pro%' LIMIT 5;"
+    note: "billing_period / quota_unit_name / trial_period_days は product canonical の直接列。product_claims を JOIN しない"
+  - id: manufacturing-inverse
+    q: "Widget X を製造している organization"
+    sql: "SELECT o.canonical_name FROM manufacturing m JOIN organization o ON o.id=m.organization_id JOIN product p ON p.id=m.product_id WHERE p.canonical_name LIKE '%Widget X%' LIMIT 20;"
+    note: "manufacturing を product→org 方向に辿る"
+  - id: org-hierarchy-children
+    q: "Globex Holdings の子組織を列挙"
+    sql: "SELECT c.canonical_name FROM org_hierarchy h JOIN organization c ON c.id=h.child_org_id JOIN organization p ON p.id=h.parent_org_id WHERE p.canonical_name LIKE '%Globex Holdings%' LIMIT 50;"
+    note: "org_hierarchy を親→子方向に辿る"
+  - id: employment-count-per-org
+    q: "organization ごとの雇用件数 上位"
+    sql: "SELECT o.canonical_name, COUNT(*) AS n FROM employment e JOIN organization o ON o.id=e.organization_id GROUP BY o.id ORDER BY n DESC LIMIT 20;"
+    note: "GROUP BY 集約"
+  - id: project-active-range
+    q: "2024 年時点で進行中の project"
+    sql: "SELECT canonical_name, started_at, ended_at FROM project WHERE started_at <= '2024-12-31' AND (ended_at IS NULL OR ended_at >= '2024-01-01') ORDER BY started_at LIMIT 50;"
+    note: "ended_at IS NULL は継続中扱い"
+  - id: contract-sla
+    q: "SLA 稼働率 99.9 % 以上の contract"
+    sql: "SELECT canonical_name, sla_uptime_percent, valid_until FROM contract WHERE sla_uptime_percent >= 99.9 ORDER BY sla_uptime_percent DESC LIMIT 50;"
+    note: "contract canonical の数値列 (R1 適合)"
+  - id: claims-conflict
+    q: "Acme の founded_year で矛盾している claim 群"
+    sql: "SELECT c.value, c.status, c.confidence, c.document_id FROM organization_claims c JOIN organization o ON o.id=c.organization_id WHERE o.canonical_name LIKE '%Acme%' AND c.column_name='founded_year' AND c.conflict_group IS NOT NULL ORDER BY c.confidence DESC LIMIT 20;"
+    note: "conflict_group NOT NULL = 矛盾 claim 群、status は R2 autofix"
+  - id: doc-grounding
+    q: "Acme に関する claim のソース文書 (slug, title)"
+    sql: "SELECT DISTINCT d.slug, d.title FROM organization_claims c JOIN organization o ON o.id=c.organization_id JOIN documents d ON d.id=c.document_id WHERE o.canonical_name LIKE '%Acme%' LIMIT 50;"
+    note: "claims.document_id → documents で出典提示"
