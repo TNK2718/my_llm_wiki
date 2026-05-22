@@ -231,6 +231,80 @@ def fts_docs(question: str, k: int = 4):
     return [{"slug": r["slug"], "snippet": r["s"]} for r in rows]
 
 
+_ENTITY_TABLES = ("person", "organization", "product", "project", "contract")
+
+
+def _candidate_strings(rows: list[dict]) -> list[str]:
+    """rows の cell から canonical_name 候補となる string を集める。
+    数値文字列・1 文字値は弾く。重複除去。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for r in rows:
+        for v in r.values():
+            if not isinstance(v, str):
+                continue
+            s = v.strip()
+            if len(s) < 2:
+                continue
+            if s.replace(".", "").replace("-", "").isdigit():
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+    return out[:50]
+
+
+def _present_entity_tables(db: sqlite3.Connection) -> list[str]:
+    """schema に定義された entity 表のうち実際に存在するものを返す。
+    fixture によっては contract 等が migration されておらず欠ける場合がある。"""
+    existing = {
+        r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    return [t for t in _ENTITY_TABLES if t in existing and f"{t}_claims" in existing]
+
+
+def sql_docs(rows: list[dict], k: int = 8) -> list[dict]:
+    """rows の string 値を canonical_name として entity 表で逆引きし、
+    対応する `*_claims.document_id` 経由で `documents.slug` を返す。
+
+    LLM が出した SQL を parse せず、post-hoc に source doc を解決する。
+    entity 名を含まない汎用 query (range 比較等) で FTS が doc を拾えない
+    ケースのフォールバック。
+
+    canonical_name claim は ingest で作られないため、column_name 条件は外し
+    status='active' のみ。何らかの claim (org_type, founded_year 等) を
+    持つ doc が「その entity を言及した doc」とみなされる。
+    """
+    cands = _candidate_strings(rows)
+    if not cands:
+        return []
+    db = kg.connect(readonly=True)
+    tables = _present_entity_tables(db)
+    if not tables:
+        return []
+    placeholders = ",".join("?" * len(cands))
+    parts = []
+    for tbl in tables:
+        parts.append(
+            f"SELECT DISTINCT d.slug AS slug, e.canonical_name AS matched_value, "
+            f"'{tbl}' AS entity_table "
+            f"FROM {tbl}_claims c "
+            f"JOIN {tbl} e ON e.id = c.{tbl}_id "
+            f"JOIN documents d ON d.id = c.document_id "
+            f"WHERE c.status = 'active' "
+            f"  AND e.canonical_name IN ({placeholders})"
+        )
+    sql = " UNION ".join(parts) + f" LIMIT {k}"
+    params = list(cands) * len(tables)
+    try:
+        return [dict(r) for r in db.execute(sql, params).fetchall()]
+    except sqlite3.Error:
+        return []
+
+
 def answer_question(question: str) -> dict:
     llm.note("question", q=question)
     sql_used, error = None, None
@@ -241,6 +315,9 @@ def answer_question(question: str) -> dict:
         llm.note("text2sql.fallback", reason=str(e))
     docs = fts_docs(question)
     llm.note("fts.docs", n_docs=len(docs), slugs=[d.get("slug") for d in docs])
+    sql_docs_ = sql_docs(rows) if rows else []
+    llm.note("sql.docs", n_docs=len(sql_docs_),
+             slugs=[d.get("slug") for d in sql_docs_])
 
     answer = ""
     try:
@@ -261,6 +338,7 @@ def answer_question(question: str) -> dict:
         "sql": sql_used,
         "rows": rows,
         "docs": docs,
+        "sql_docs": sql_docs_,
         "answer": answer,
         "error": error,
     }

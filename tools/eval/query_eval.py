@@ -61,8 +61,12 @@ def _evaluate_one(qa: dict, answer_question) -> dict:
     contains_total = len(expected_contains)
     contains_rate = (len(contains_hits) / contains_total) if contains_total else None
 
-    # doc slugs
-    pred_slugs = [d.get("slug") for d in docs]
+    # doc slugs: FTS と SQL 経路 (sql_docs) の union を取る
+    sql_docs_ = res.get("sql_docs") or []
+    pred_slugs = sorted(
+        {d.get("slug") for d in docs} | {d.get("slug") for d in sql_docs_}
+    )
+    pred_slugs = [s for s in pred_slugs if s]
     slug_hits = [s for s in expected_slugs if s in pred_slugs]
     slug_rate = (len(slug_hits) / len(expected_slugs)) if expected_slugs else None
 
