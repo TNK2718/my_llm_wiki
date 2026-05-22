@@ -60,3 +60,10 @@ HINT_EMBED_THRESHOLD = 0.55       # cosine 類似。bge-m3 で意味的に近い
 HINT_TOPK_PER_COLUMN = 3
 HINT_VOCAB_CAP = 12
 HINT_MAX_CHARS = 700              # 8192 ctx 圧迫防止
+
+# --- entity matching (db.candidate_entities_*) ---
+# typed-schema-design §D1 の「決定論的算出 (norm_key + embedding cos sim)」を実装する閾値。
+# text2sql の HINT_* は recall 寄り、こちらは誤マージ防止のため precision 寄りで高めに設定。
+ENTITY_TRIGRAM_THRESHOLD = 0.30   # candidate_entities_by_similarity(min_sim) のデフォルト
+ENTITY_EMBED_THRESHOLD = 0.70     # cosine 類似度を「候補として採用」するしきい値
+ENTITY_EMBED_ENABLED = True       # 緊急時に trigram + norm_key だけに戻すための feature flag

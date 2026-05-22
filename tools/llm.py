@@ -8,7 +8,11 @@ stream_session(emit) を with でくくると、同じイベントが emit(dict)
 さらに ask() は Ollama を stream=True で叩き、llm.ask.start / llm.delta を emit する。
 非 stream session 下では完全に従来挙動。
 """
+import hashlib
 import json
+import math
+import sqlite3
+import struct
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -229,6 +233,56 @@ def embed(text: str) -> list[float] | None:
             error=f"{type(e).__name__}: {e}",
         )
         return None
+
+
+# ---------- 永続キャッシュ付き embed + cosine ----------
+# column_hints (query.py) と entity matching (db.py via ingest.py) の両方で同じ
+# data/embed_cache.sqlite を共有する。cache key は SHA1(EMBED_MODEL|text)。
+def _embed_cache_conn() -> sqlite3.Connection:
+    config.EMBED_CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(config.EMBED_CACHE_DB)
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS embed_cache("
+        " key TEXT PRIMARY KEY, vec BLOB NOT NULL)"
+    )
+    return c
+
+
+def embed_cached(text: str) -> list[float] | None:
+    """embed() の永続キャッシュ版。Ollama 失敗時は None で縮退。"""
+    if not text:
+        return None
+    key = hashlib.sha1(f"{config.EMBED_MODEL}|{text}".encode("utf-8")).hexdigest()
+    c = _embed_cache_conn()
+    try:
+        row = c.execute("SELECT vec FROM embed_cache WHERE key=?", (key,)).fetchone()
+        if row:
+            blob = row[0]
+            n = len(blob) // 4
+            return list(struct.unpack(f"{n}f", blob))
+        v = embed(text)
+        if v is None:
+            return None
+        blob = struct.pack(f"{len(v)}f", *v)
+        c.execute("INSERT OR REPLACE INTO embed_cache(key,vec) VALUES(?,?)", (key, blob))
+        c.commit()
+        return v
+    finally:
+        c.close()
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """L2 正規化なしの cosine 類似度。空 / 長さ不一致 / zero norm は 0.0。"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    s = sa = sb = 0.0
+    for x, y in zip(a, b):
+        s += x * y
+        sa += x * x
+        sb += y * y
+    if sa <= 0 or sb <= 0:
+        return 0.0
+    return s / (math.sqrt(sa) * math.sqrt(sb))
 
 
 def _parse_json_loose(raw: str):

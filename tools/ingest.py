@@ -213,9 +213,14 @@ def _resolve_entity(
     """
     if not e.canonical_name:
         return None
+    # entity 名の embedding は 1 entity あたり 1 回計算 (cache 命中で実呼び出しは初回のみ)。
+    # Ollama 失敗時は None で縮退し、下流の candidate 関数は trigram + norm_key だけで動作する。
+    q_vec = llm.embed_cached(e.canonical_name)
     if e.proposed_type not in STARTER_ENTITY_TYPES:
         # 未知型 → staging + schema_proposal。decisive 類似度は pipeline 側で算出
-        existing = kg.candidate_entities_across_tables(db, e.canonical_name)
+        existing = kg.candidate_entities_across_tables(
+            db, e.canonical_name, query_embedding=q_vec,
+        )
         kg.add_staging_extraction(
             db, doc_id,
             raw_payload=e.model_dump_json(),
@@ -286,7 +291,9 @@ def _resolve_entity(
             evidence=e.evidence, confidence=e.confidence,
         )
         if r.result == kg.RecordClaimResult.REJECTED_LOW_CONFIDENCE:
-            existing = kg.candidate_entities_by_similarity(db, table, e.canonical_name)
+            existing = kg.candidate_entities_by_similarity(
+                db, table, e.canonical_name, query_embedding=q_vec,
+            )
             kg.add_staging_extraction(
                 db, doc_id,
                 raw_payload=json.dumps(

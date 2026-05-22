@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import config
+import llm
 from normalize import normalize, similarity  # re-export for callers
 
 
@@ -230,14 +231,19 @@ def candidate_entities_by_similarity(
     *,
     top_k: int = 5,
     min_sim: float = 0.3,
+    query_embedding: Optional[list[float]] = None,
 ) -> list[dict]:
     """設計柱 D1 の決定論的類似度算出。canonical_name と aliases を走査し、
 
     1. norm_key 完全一致を similarity=1.0, norm_key_match=True で最優先
-    2. 続いて name の trigram Jaccard で similarity >= min_sim の上位 top_k 件
+    2. name の trigram Jaccard で similarity >= min_sim
+    3. query_embedding 指定時、canonical_name の cosine 類似が
+       config.ENTITY_EMBED_THRESHOLD を超えるものを追加で拾う
+       (trigram でゼロ近くまで落ちる「Anthropic ↔ Anthropic, PBC」「東京大学 ↔ 東大」
+        のような表記揺れを救済する)
 
-    を返す。各 dict: {id, canonical_name, norm_key, similarity, norm_key_match}.
-    候補ゼロなら []。
+    各 dict: {id, canonical_name, norm_key, similarity, sim_tri, sim_emb, norm_key_match}.
+    候補ゼロなら []。query_embedding が None または Ollama 縮退時は trigram + norm_key だけで動作。
     """
     if table not in ENTITY_TABLES:
         raise ValueError(f"unknown entity table: {table}")
@@ -256,20 +262,37 @@ def candidate_entities_by_similarity(
     ).fetchall():
         alias_idx.setdefault(ar["id"], []).append(ar["norm_key"])
 
+    use_embed = config.ENTITY_EMBED_ENABLED and query_embedding is not None
+
     out: list[dict] = []
     for r in rows:
         norm_keys = [r["norm_key"]] + alias_idx.get(r["id"], [])
         norm_match = any(k == nk for k in norm_keys if k)
-        sim = max((similarity(nk, k) for k in norm_keys if k), default=0.0)
-        if norm_match:
-            sim = 1.0
-        if not norm_match and sim < min_sim:
+        sim_tri = max((similarity(nk, k) for k in norm_keys if k), default=0.0)
+        sim_emb: Optional[float] = None
+        if use_embed:
+            row_vec = llm.embed_cached(r["canonical_name"])
+            if row_vec is not None:
+                sim_emb = llm.cosine(query_embedding, row_vec)
+        include = (
+            norm_match
+            or sim_tri >= min_sim
+            or (sim_emb is not None and sim_emb >= config.ENTITY_EMBED_THRESHOLD)
+        )
+        if not include:
             continue
+        sim = max(
+            1.0 if norm_match else 0.0,
+            sim_tri,
+            sim_emb if sim_emb is not None else 0.0,
+        )
         out.append({
             "id": r["id"],
             "canonical_name": r["canonical_name"],
             "norm_key": r["norm_key"],
             "similarity": round(sim, 4),
+            "sim_tri": round(sim_tri, 4),
+            "sim_emb": round(sim_emb, 4) if sim_emb is not None else None,
             "norm_key_match": norm_match,
         })
     out.sort(key=lambda d: (not d["norm_key_match"], -d["similarity"]))
@@ -282,16 +305,21 @@ def candidate_entities_across_tables(
     *,
     top_k_per_table: int = 3,
     min_sim: float = 0.3,
+    query_embedding: Optional[list[float]] = None,
 ) -> list[dict]:
     """starter 全 entity table を横断して候補を返す。
 
     未知型 staging で「既存の似た entity がどの型に居るか」を提示するための関数。
-    各 dict: {table, id, canonical_name, similarity, norm_key_match}.
+    query_embedding は子関数にそのまま渡され、各テーブル内で cosine 類似比較に使われる。
+    各 dict: {table, id, canonical_name, similarity, sim_tri, sim_emb, norm_key_match}.
     """
     out: list[dict] = []
     for tbl in ENTITY_TABLES:
         for c in candidate_entities_by_similarity(
-            db, tbl, name, top_k=top_k_per_table, min_sim=min_sim
+            db, tbl, name,
+            top_k=top_k_per_table,
+            min_sim=min_sim,
+            query_embedding=query_embedding,
         ):
             out.append({"table": tbl, **c})
     out.sort(key=lambda d: (not d["norm_key_match"], -d["similarity"]))
