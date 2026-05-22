@@ -235,6 +235,8 @@ def text2sql(question: str):
     2) エラー or 0 行なら lint 違反内容/エラー文を追記して 1 回 retry (hints は再利用)。
     3) それでも失敗なら呼び出し元で FTS fallback。
     """
+    import schema_block  # 遅延 import: schema_block が query._embed_cached を参照するため循環回避
+
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
     hints = column_hints(question)
     llm.note("text2sql.hints", text=hints, has_hints=bool(hints))
@@ -242,8 +244,11 @@ def text2sql(question: str):
     fewshots = select_fewshots(question, k=config.FEWSHOT_TOPK)
     llm.note("text2sql.fewshots", ids=[f["id"] for f in fewshots])
     fewshot_block = _format_fewshots(fewshots)
+    schema = schema_block.build_schema_block(question)
+    llm.note("text2sql.schema", n_bytes=len(schema))
     base_prompt = (
-        tmpl.replace("{HINTS}", hint_block)
+        tmpl.replace("{SCHEMA}", schema)
+        .replace("{HINTS}", hint_block)
         .replace("{FEWSHOTS}", fewshot_block)
         .replace("{QUESTION}", question)
     )

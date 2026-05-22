@@ -226,6 +226,9 @@ data/eval/runs/*
 # fewshot プール (text2sql 動的 fewshot 用 curated YAML) は git 管理
 !data/fewshot/
 
+# schema docs (text2sql 動的スキーマブロックの extra 表 role 文) は git 管理
+!data/schema_docs.yml
+
 # 旧 eval パス（参考）
 eval/storage/*.sqlite*
 eval/results/*.json

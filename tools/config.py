@@ -67,6 +67,13 @@ HINT_MAX_CHARS = 700              # 8192 ctx 圧迫防止
 FEWSHOT_POOL = ROOT / "data" / "fewshot" / "text2sql.yml"
 FEWSHOT_TOPK = 3
 
+# --- text2sql スキーマブロック動的生成 ---
+# Core 表 (documents + entity canonical + relation junction) は常時注入、
+# それ以外 (aliases / claims / existence / weak_relations 等) は質問との
+# embedding cos-sim で top-K 選択する。schema_docs.yml の role 文が embed 対象。
+SCHEMA_DOCS = ROOT / "data" / "schema_docs.yml"
+SCHEMA_EXTRA_TOPK = 5
+
 # --- entity matching (db.candidate_entities_*) ---
 # typed-schema-design §D1 の「決定論的算出 (norm_key + embedding cos sim)」を実装する閾値。
 # text2sql の HINT_* は recall 寄り、こちらは誤マージ防止のため precision 寄りで高めに設定。

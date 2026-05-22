@@ -172,11 +172,16 @@ def test_format_fewshots_uses_1_indexed_examples():
 
 
 def test_prompt_template_has_fewshots_placeholder():
-    """text2sql.txt が {FEWSHOTS} placeholder を持ち、旧固定例が消えていることを確認。"""
+    """text2sql.txt が {SCHEMA}/{FEWSHOTS}/{HINTS}/{QUESTION} placeholder を持ち、
+    旧固定例 / 旧 hard-coded スキーマが消えていることを確認。"""
     tmpl = (config.PROMPTS / "text2sql.txt").read_text(encoding="utf-8")
+    assert "{SCHEMA}" in tmpl
     assert "{FEWSHOTS}" in tmpl
     assert "{HINTS}" in tmpl
     assert "{QUESTION}" in tmpl
+    # 旧 hard-coded スキーマ宣言の sentinel が消えていること (drift 再発防止)
+    assert "person(id, canonical_name, norm_key, birth_date" not in tmpl
+    assert "product(id, canonical_name, norm_key, release_date, category" not in tmpl
     # 旧 hard-coded 例の sentinel は消えていること (回帰防止)
     assert "Acme の CEO は誰か" not in tmpl
     assert "1990 年以降に生まれた person を列挙" not in tmpl

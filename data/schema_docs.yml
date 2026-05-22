@@ -1,0 +1,60 @@
+# text2sql スキーマブロックの extra (= 非 core) 表の役割記述。
+# tools/schema_block.py::select_extra_tables が読み込む。
+#
+# 運用方針:
+# - 質問と各 item.role の embedding cos-sim 上位 K 件 (config.SCHEMA_EXTRA_TOPK)
+#   が prompt の「-- 関連 (質問に応じて自動選択)」ブロックに注入される。
+# - 新しい extra 表を schema.sql に追加したらここに 1 行 role 文を加える。
+# - 書き忘れても extra 候補に出ないだけで silent drift にはならない (core はちゃんと出る)。
+# - role 文は LLM 向けの自然文 (どんな質問でその表が役立つか) で書く。列名の羅列は不要。
+version: 1
+items:
+  # --- aliases (entity の別名解決) ---
+  - table: person_aliases
+    role: "person の別名 (英表記・略称・JP 表記の解決に使う)"
+  - table: organization_aliases
+    role: "organization の別名 (英表記・略称・JP 表記)"
+  - table: product_aliases
+    role: "product の別名 (旧名・略称・大文字小文字違い)"
+  - table: project_aliases
+    role: "project の別名"
+  - table: contract_aliases
+    role: "contract の別名 (条文番号・略称)"
+
+  # --- entity claims (属性履歴・裏付け・矛盾) ---
+  - table: person_claims
+    role: "person 属性の履歴 / 裏付け / 矛盾 (column_name で属性指定)"
+  - table: organization_claims
+    role: "organization 属性 (org_type, founded_year, headquarters) の履歴"
+  - table: product_claims
+    role: "product 属性 (release_date, category, billing_period, trial_period_days 等) の履歴"
+  - table: project_claims
+    role: "project 属性 (started_at, ended_at) の履歴"
+  - table: contract_claims
+    role: "contract 属性 (effective_date, valid_until, jurisdiction, SLA 等) の履歴"
+
+  # --- relation attribute claims ---
+  - table: employment_claims
+    role: "employment 関係の属性 (role, end_date) の履歴"
+
+  # --- relation existence claims (関係の存在主張ログ) ---
+  - table: employment_existence_claims
+    role: "employment 関係の存在主張ログ (全文書ごとの裏付け)"
+  - table: manufacturing_existence_claims
+    role: "manufacturing (製造主体) 関係の存在主張ログ"
+  - table: org_hierarchy_existence_claims
+    role: "組織階層 (親子関係) の存在主張ログ"
+  - table: product_variant_existence_claims
+    role: "product 派生関係 (Pro/Plus 等のバリアント) の存在主張ログ"
+  - table: governance_existence_claims
+    role: "product と contract (governance) の対応関係の存在主張ログ"
+  - table: compliance_existence_claims
+    role: "contract が遵守を主張する標準・規格 (compliance) の存在主張ログ"
+
+  # --- その他 ---
+  - table: entity_mentions
+    role: "各文書中のエンティティ surface form と span オフセット"
+  - table: weak_relations
+    role: "型不明 / confidence 閾値以下の長尾関係 (predicate ベース、subject/object 文字列)"
+  - table: doc_fts
+    role: "documents の FTS5 全文検索インデックス (title, body)"
