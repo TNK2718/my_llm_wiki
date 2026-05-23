@@ -262,7 +262,7 @@ def text2sql(question: str):
         sql = validate_sql(sql_raw)
         llm.note("text2sql.validate", attempt=1, sql=sql, ok=True)
         rows = run_ro(sql)
-        llm.note("text2sql.run", attempt=1, n_rows=len(rows))
+        llm.note("text2sql.run", attempt=1, n_rows=len(rows), rows=rows[:20])
         if rows:
             return sql, rows
     except (ValueError, sqlite3.Error) as e:
@@ -297,7 +297,7 @@ def text2sql(question: str):
         sql2 = validate_sql(re.sub(r"```sql|```", "", fix).strip())
         llm.note("text2sql.validate", attempt=2, sql=sql2, ok=True)
         rows2 = run_ro(sql2)
-        llm.note("text2sql.run", attempt=2, n_rows=len(rows2))
+        llm.note("text2sql.run", attempt=2, n_rows=len(rows2), rows=rows2[:20])
     except (ValueError, sqlite3.Error) as e2:
         llm.note("text2sql.validate" if isinstance(e2, ValueError) else "text2sql.run",
                  attempt=2, ok=False, error=f"{type(e2).__name__}: {e2}")

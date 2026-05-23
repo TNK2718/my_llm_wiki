@@ -987,11 +987,26 @@ const ASK_PURPOSE_LABEL={
   'answer': '回答文生成',
 };
 
+function _askRowsTable(rows, nRows){
+  const cols=Object.keys(rows[0]||{});
+  const shown=rows.length;
+  const total=(typeof nRows==='number')?nRows:shown;
+  const truncated=total>shown;
+  const summary=`rows preview (showing ${shown}/${total}${truncated?', truncated':''})`;
+  const head='<tr>'+cols.map(x=>`<th>${_escHtml(x)}</th>`).join('')+'</tr>';
+  const body=rows.map(row=>'<tr>'+cols.map(x=>`<td>${_escHtml(row[x]??'')}</td>`).join('')+'</tr>').join('');
+  return `<details style="margin-top:6px"><summary style="cursor:pointer;color:var(--dim);font-size:10.5px">${_escHtml(summary)}</summary>`+
+         `<div style="margin:6px 0;max-height:240px;overflow:auto;border:1px solid var(--line);background:var(--panel2)"><table style="font-size:11px">${head}${body}</table></div>`+
+         `</details>`;
+}
+
 function _askLine(kind, ev){
   const isErr=ev && (ev.error || ev.ok===false);
   const cls=isErr?'err':'';
   const label=ASK_KIND_LABEL[kind]||kind;
   const skip=new Set(['kind','t_ms','prompt','response','elapsed_ms','model','result']);
+  const hasRows=kind==='text2sql.run' && ev && Array.isArray(ev.rows) && ev.rows.length>0;
+  if(hasRows) skip.add('rows');
   const parts=[];
   for(const [k,v] of Object.entries(ev||{})){
     if(skip.has(k)) continue;
@@ -1003,6 +1018,7 @@ function _askLine(kind, ev){
       parts.push(`<span class="dim">${_escHtml(k)}=${_escHtml(sv)}</span>`);
     }
   }
+  if(hasRows) parts.push(_askRowsTable(ev.rows, ev.n_rows));
   const elapsed=ev && ev.elapsed_ms!=null ? `<span class="elapsed">${ev.elapsed_ms}ms</span>` : '';
   return `<div class="step ${cls}"><span class="kind">${_escHtml(label)}</span>${elapsed} ${parts.join(' ')}</div>`;
 }
