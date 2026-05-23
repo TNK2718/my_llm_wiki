@@ -53,10 +53,10 @@ MIGRATIONS_DIR = ROOT / "tools" / "migrations"
 
 # --- text2sql ヒント (attempt 1 から注入、attempt 2 でも再利用) ---
 EMBED_URL = "http://localhost:11434/api/embeddings"
-EMBED_MODEL = "bge-m3:latest"     # 多言語・日本語強め (1024 dim)。granite より重いが cache で吸収。
+EMBED_MODEL = "nomic-embed-text:latest"  # 768 dim, nomic-bert。軽量で安定。日本語類似は弱めなので閾値は低めに。
 EMBED_CACHE_DB = ROOT / "data" / "embed_cache.sqlite"  # 値→ベクトルの永続キャッシュ
 HINT_TRIGRAM_THRESHOLD = 0.20     # 突合(0.55)より緩く、recall 寄り。日本語同義語ペア (評価版↔トライアル版) は trigram で 0.1 前後しか出ないので、embed と組み合わせて拾う。
-HINT_EMBED_THRESHOLD = 0.55       # cosine 類似。bge-m3 で意味的に近い同義語を 0.55+ で拾う想定。
+HINT_EMBED_THRESHOLD = 0.55       # cosine 類似。意味的に近い同義語を拾う想定。embed model 変更時は要再キャリブ。
 HINT_TOPK_PER_COLUMN = 3
 HINT_VOCAB_CAP = 12
 HINT_MAX_CHARS = 700              # 8192 ctx 圧迫防止

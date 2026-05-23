@@ -207,7 +207,12 @@ def ask(prompt: str, system: str = "", temperature: float | None = None) -> str:
 
 
 def embed(text: str) -> list[float] | None:
-    """Ollama /api/embeddings を 1 回叩く。失敗時は None で呼び出し側に縮退を委ねる。"""
+    """Ollama /api/embeddings を 1 回叩く。失敗時は None で呼び出し側に縮退を委ねる。
+
+    Ollama が 5xx を返したときは body の `{"error": "..."}` をログに残し、
+    モデル/embed エンドポイント側の問題を切り分けやすくする (例: bert 系で flash
+    attn が auto-enable されて NaN ベクトルになり JSON エンコード失敗 → 500)。
+    """
     if not text:
         return None
     t0 = time.time()
@@ -217,7 +222,14 @@ def embed(text: str) -> list[float] | None:
             json={"model": config.EMBED_MODEL, "prompt": text},
             timeout=60,
         )
-        r.raise_for_status()
+        if not r.ok:
+            body = r.text[:300] if r.text else ""
+            _record_llm(
+                "llm.embed", text[:200], None, config.EMBED_MODEL,
+                int((time.time() - t0) * 1000),
+                error=f"HTTP {r.status_code}: {body}",
+            )
+            return None
         v = r.json().get("embedding")
         ok = isinstance(v, list) and bool(v)
         _record_llm(
